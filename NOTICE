@@ -1,0 +1,10 @@
+Raddy
+
+Caddy (https://github.com/caddyserver/caddy), by Matthew Holt and the Caddy Authors,
+is a behavioral reference for Raddy's Caddyfile adapter and HTTP routing. Caddy is
+licensed under the Apache License, Version 2.0.
+
+The Cloudflare DNS provider for Caddy (https://github.com/caddy-dns/cloudflare)
+is a reference for Cloudflare token configuration. Raddy has its own Rust
+implementation; it does not load or bundle Caddy modules. Raddy is not affiliated
+with the Caddy project.

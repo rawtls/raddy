@@ -1,0 +1,43 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Format, lint, and test
+        run: |
+          mkdir -p target
+          docker run --rm -v "$PWD:/build" -w /build rust:1.94.0-bookworm bash -ec '
+            rustup component add rustfmt clippy
+            cargo fmt --all -- --check
+            cargo clippy --locked --all-targets -- -D warnings
+            cargo test --locked --all-targets
+          '
+      - name: Compare HTTP routing with Caddy
+        run: |
+          export PATH="$PWD/target/ci-caddy:$PATH"
+          mkdir -p target/ci-caddy
+          base=https://github.com/caddyserver/caddy/releases/download/v2.10.2
+          archive=caddy_2.10.2_linux_amd64.tar.gz
+          curl -fsSL -o "target/ci-caddy/$archive" "$base/$archive"
+          curl -fsSL "$base/caddy_2.10.2_checksums.txt" | awk -v name="$archive" '$2==name' | (cd target/ci-caddy && sha512sum -c -)
+          tar -C target/ci-caddy -xzf "target/ci-caddy/$archive" caddy
+          docker run --rm -v "$PWD:/build" -w /build rust:1.94.0-bookworm cargo build --locked
+          python3 tests/caddy_parity.py target/debug/raddy
+          python3 tests/network.py target/debug/raddy

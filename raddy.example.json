@@ -1,0 +1,21 @@
+{
+  "http_addr": "0.0.0.0:80",
+  "https_addr": "0.0.0.0:443",
+  "email": "admin@example.com",
+  "data_dir": "./raddy-data",
+  "cloudflare": {
+    "api_token": "{env.CF_API_TOKEN}",
+    "timeout_secs": 30,
+    "retries": 3
+  },
+  "sites": [
+    {
+      "hosts": ["example.com", "www.example.com"],
+      "upstreams": ["http://127.0.0.1:8080"],
+      "response_headers": {
+        "Strict-Transport-Security": "max-age=31536000",
+        "X-Content-Type-Options": "nosniff"
+      }
+    }
+  ]
+}

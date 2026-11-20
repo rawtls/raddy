@@ -1,0 +1,129 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to build and publish (empty runs checks only)
+        type: string
+        required: false
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
+      - name: Test locked dependencies
+        run: |
+          docker run --rm -v "$PWD:/build" -w /build rust:1.94.0-bookworm \
+            bash -ec 'rustup component add clippy && cargo test --locked --all-targets && cargo clippy --locked --all-targets -- -D warnings'
+      - name: Build image and exercise a real HTTP request
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          docker build --tag "raddy-build:$ARCH" \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=$(git rev-parse HEAD)" .
+          tmp=$(mktemp -d)
+          trap 'docker rm -f raddy-smoke >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+          chmod 755 "$tmp"
+          printf 'http://localhost {\n  root /smoke\n  file_server\n  import /smoke/health.caddy\n}\n' > "$tmp/Raddyfile"
+          printf 'respond /healthz "ok" 200\n' > "$tmp/health.caddy"
+          printf 'raddy smoke test\n' > "$tmp/index.html"
+          docker run --rm -v "$tmp:/smoke:ro" -v "$tmp/Raddyfile:/etc/raddy/Raddyfile:ro" "raddy-build:$ARCH" validate
+          docker run -d --name raddy-smoke -p 127.0.0.1::80 \
+            -v "$tmp:/smoke:ro" -v "$tmp/Raddyfile:/etc/raddy/Raddyfile:ro" "raddy-build:$ARCH"
+          address=$(docker port raddy-smoke 80/tcp)
+          if ! body=$(curl -fsS --max-time 3 --retry 8 --retry-connrefused -H "Host: localhost" "http://$address/index.html"); then
+            docker logs raddy-smoke
+            exit 1
+          fi
+          test "$body" = 'raddy smoke test'
+          test "$(curl -fsS --max-time 3 -H 'Host: localhost' "http://$address/healthz")" = ok
+          test "$(curl -fsS --max-time 3 -H 'Host: localhost' -H 'Range: bytes=6-10' "http://$address/index.html")" = smoke
+          etag=$(curl -fsSI --max-time 3 -H 'Host: localhost' "http://$address/index.html" | tr -d '\r' | awk 'tolower($1)=="etag:" {print $2}')
+          test -n "$etag"
+          test "$(curl -fsS --max-time 3 -o /dev/null -w '%{http_code}' -H 'Host: localhost' -H "If-None-Match: $etag" "http://$address/index.html")" = 304
+          for file in Raddyfile health.caddy; do
+            test "$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' -H 'Host: localhost' "http://$address/$file")" = 404
+          done
+          printf 'handle_path /health/* {\n  respond /ready "reloaded" 200\n}\n' > "$tmp/health.caddy"
+          docker kill --signal=USR1 raddy-smoke >/dev/null
+          body=
+          for _ in {1..30}; do
+            body=$(curl -sS --max-time 3 -H 'Host: localhost' "http://$address/health/ready")
+            if [[ "$body" == reloaded ]]; then break; fi
+            sleep 0.1
+          done
+          test "$body" = reloaded
+          docker cp raddy-smoke:/usr/local/bin/raddy "$tmp/raddy"
+          python3 tests/network.py "$tmp/raddy"
+          mkdir dist
+          tar -C "$tmp" -czf "dist/raddy-linux-$ARCH.tar.gz" raddy
+          docker save "raddy-build:$ARCH" | gzip > "dist/raddy-image-linux-$ARCH.tar.gz"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: linux-*
+          merge-multiple: true
+          path: dist
+      - name: Publish verified images and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          version="$RELEASE_TAG"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io' EXIT
+          for arch in amd64 arm64; do
+            docker load --input "dist/raddy-image-linux-$arch.tar.gz"
+            docker tag "raddy-build:$arch" "$image:$version-$arch"
+            docker push "$image:$version-$arch"
+          done
+          docker buildx imagetools create \
+            --tag "$image:$version" --tag "$image:${version#v}" \
+            "$image:$version-amd64" "$image:$version-arm64"
+          docker buildx imagetools inspect "$image:$version"
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          gh release create "$version" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Raddy $version" \
+            --notes "Linux amd64 and arm64 binaries and Docker archives. Container: \`$image:$version\`. Both architectures passed Rust tests, an HTTP container smoke test, and network integration tests on the packaged binary." \
+            dist/*.tar.gz dist/SHA256SUMS

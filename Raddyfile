@@ -1,0 +1,50 @@
+{
+	email admin@example.com
+	data_dir ./raddy-data
+	default_bind 0.0.0.0
+
+	# Общий Cloudflare DNS-01 для сайтов с автоматическими сертификатами.
+	cloudflare {
+		api_token {env.CF_API_TOKEN}
+		# При раздельных правах:
+		# zone_token {env.CF_ZONE_TOKEN}
+	}
+}
+
+# HTTPS + reverse proxy. Для DNS-01 нужен Cloudflare.
+example.com {
+	reverse_proxy http://127.0.0.1:8081
+	header X-Content-Type-Options nosniff
+}
+
+# TLS passthrough: app.example.com — SNI-маршрут, :9443 — listener.
+# TLS завершается на backend; Raddy не подменяет его сертификат.
+tls://app.example.com:9443 {
+	connect_timeout 10s
+	idle_timeout 5m
+	handshake_timeout 10s
+	max_handshake_bytes 16384
+	proxy 10.0.0.10:443 10.0.0.11:443
+}
+
+tls://*.internal.example.com:9443 {
+	proxy 10.0.1.10:443
+}
+
+# Fallback для остального SNI. Без этого блока неизвестный SNI отклоняется.
+tls://*:9443 {
+	proxy 10.0.2.10:443
+}
+
+# Обычный TCP-прокси без анализа SNI.
+tcp://:5432 {
+	proxy 10.0.0.20:5432
+}
+
+# Статика на HTTP для локального теста или закрытого периметра.
+http://static.example.com:8080 {
+	root * ./public
+	file_server {
+		index index.html index.htm
+	}
+}
