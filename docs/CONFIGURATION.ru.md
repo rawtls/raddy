@@ -48,7 +48,7 @@ docker run --rm --name raddy -p 80:80 -p 443:443 \
 ```yaml
 services:
   raddy:
-    image: ghcr.io/rawtls/raddy:v0.3.0
+    image: ghcr.io/rawtls/raddy:v0.4.0
     container_name: raddy
     restart: unless-stopped
     stop_grace_period: 35s
