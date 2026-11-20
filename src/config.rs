@@ -297,6 +297,7 @@ impl Config {
         if self.sites.iter().any(|site| site.tls) && self.https_addr.port() == 0 {
             bail!("https_addr must use a fixed port when TLS is enabled");
         }
+        let mut site_names = std::collections::BTreeSet::new();
         for (index, site) in self.sites.iter().enumerate() {
             if site.hosts.is_empty() {
                 bail!("sites[{index}].hosts must not be empty");
@@ -326,11 +327,24 @@ impl Config {
                 {
                     bail!("invalid host name {host:?} in sites[{index}]");
                 }
+                let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+                if normalized.is_empty() || !site_names.insert((site.tls, normalized)) {
+                    bail!("empty or duplicate site name {host:?} in sites[{index}]");
+                }
                 if host == "*" && site.tls {
                     bail!(
                         "a wildcard-only host cannot receive an ACME certificate; list concrete names"
                     );
                 }
+            }
+            for (name, value) in &site.response_headers {
+                http::HeaderName::from_bytes(name.as_bytes())?;
+                ProxyHeader {
+                    name: name.clone(),
+                    value: Some(value.clone()),
+                }
+                .validate(false)
+                .with_context(|| format!("invalid sites[{index}].response_headers"))?;
             }
             validate_http_upstreams(&site.upstreams)?;
             if (!site.routes.is_empty() || !site.error_routes.is_empty())

@@ -20,7 +20,7 @@ def request(port, path, headers=None):
     try:
         conn.request("GET", path, headers=headers or {})
         reply = conn.getresponse()
-        return reply.status, reply.read(), reply.getheader("X-Test"), reply.getheader("Content-Range")
+        return reply.status, reply.read(), reply.getheader("X-Test"), reply.getheader("Content-Range"), reply.getheader("Content-Type")
     finally:
         conn.close()
 
@@ -68,6 +68,10 @@ http://127.0.0.1:PORT {
     handle /encoded%2Fname {
         respond encoded
     }
+    handle /header-override {
+        header /header-override Content-Type application/x-parity
+        respond "header checked"
+    }
     handle /failure {
         error "not there" 404
     }
@@ -112,11 +116,12 @@ http://127.0.0.1:PORT {
             ("/static/sample.txt", {"Range": "bytes=1-3"}, (206, b"bcd", None, "bytes 1-3/6")),
             ("/encoded%2fname", None, (200, b"encoded", None, None)),
             ("/failure", None, (404, b"error 404", None, None)),
+            ("/header-override", None, (200, b"header checked", None, None, "application/x-parity")),
             ("/imported", None, (200, b"imported", None, None)),
             ("/deep/app/path", None, (200, b"spa", None, None)),
         ]
         for path, headers, expected in cases:
-            actual = [request(listen, path, headers) for listen in addresses]
+            actual = [request(listen, path, headers)[:len(expected)] for listen in addresses]
             assert actual == [expected, expected], (path, expected, actual)
         print(f"{len(cases)} HTTP routing cases matched Caddy")
 

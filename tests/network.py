@@ -174,17 +174,21 @@ tcp://:{relay} {{
                 expected = socket.inet_aton("198.51.100.9") + socket.inet_aton("203.0.113.6") + struct.pack("!HH", 5678, 443)
                 assert exact(upstream_conn, 12) == expected
                 assert exact(upstream_conn, len(hello)) == hello
+                conn.shutdown(socket.SHUT_WR)
+                closed(upstream_conn)
+                upstream_conn.shutdown(socket.SHUT_WR)
+                closed(conn)
 
-        first = connect(relay)
-        second = connect(relay)
-        resources.callback(first.close)
-        resources.callback(second.close)
-        first_up = resources.enter_context(backend.accept()[0])
-        second_up = resources.enter_context(backend.accept()[0])
-        for upstream_conn in (first_up, second_up):
-            upstream_conn.settimeout(3)
-            while exact(upstream_conn, 1) != b"\n":
-                pass
+        def relay_pair():
+            client = resources.enter_context(connect(relay))
+            endpoint = resources.enter_context(backend.accept()[0])
+            endpoint.settimeout(3)
+            preface = f"PROXY TCP4 127.0.0.1 127.0.0.1 {client.getsockname()[1]} {relay}\r\n".encode()
+            assert exact(endpoint, len(preface)) == preface
+            return client, endpoint
+
+        first, first_up = relay_pair()
+        second, second_up = relay_pair()
         with connect(shared) as excess:
             closed(excess)
         configure(1, "new")

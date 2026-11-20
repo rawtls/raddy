@@ -74,7 +74,15 @@ def sample(pids):
     return cpu, rss
 
 
-def nginx_config(root, plain, secure, backend):
+def nginx_config(root, plain, secure, backend, origin=None):
+    relay = """
+        location / {
+            proxy_pass http://files;
+            proxy_http_version 1.1;
+            proxy_set_header Connection "";
+            proxy_buffering off;
+        }""" if origin else ""
+    upstream = f"    upstream files {{ server 127.0.0.1:{origin}; keepalive 128; }}" if origin else ""
     return f'''
 worker_processes 1;
 error_log stderr error;
@@ -91,9 +99,10 @@ http {{
     uwsgi_temp_path {root}/uwsgi;
     scgi_temp_path {root}/scgi;
     upstream echo {{ server 127.0.0.1:{backend}; keepalive 128; }}
+{upstream}
     server {{
         listen 127.0.0.1:{plain};
-        root {root}/public;
+        root {root}/public;{relay}
     }}
     server {{
         listen 127.0.0.1:{secure} ssl;
@@ -102,7 +111,7 @@ http {{
         ssl_protocols TLSv1.3;
         ssl_session_tickets off;
         ssl_session_cache off;
-        root {root}/public;
+        root {root}/public;{relay}
         location /proxy {{
             proxy_pass http://echo;
             proxy_http_version 1.1;
@@ -115,7 +124,8 @@ http {{
 '''
 
 
-def caddy_config(root, plain, secure, backend):
+def caddy_config(root, plain, secure, backend, origin=None):
+    files = f"reverse_proxy http://127.0.0.1:{origin}" if origin else f"root {root}/public\n    file_server"
     return f'''
 {{
     admin off
@@ -127,8 +137,7 @@ def caddy_config(root, plain, secure, backend):
 }}
 http://localhost:{plain} {{
     bind 127.0.0.1
-    root {root}/public
-    file_server
+    {files}
 }}
 https://localhost:{secure} {{
     bind 127.0.0.1
@@ -144,14 +153,14 @@ https://localhost:{secure} {{
         }}
     }}
     handle {{
-        root {root}/public
-        file_server
+        {files}
     }}
 }}
 '''
 
 
-def raddy_config(root, plain, secure, backend, proxy_backend):
+def raddy_config(root, plain, secure, backend, proxy_backend, origin=None):
+    files = f"reverse_proxy http://127.0.0.1:{origin}" if origin else f"root {root}/public\n    file_server"
     return f'''
 {{
     default_bind 127.0.0.1
@@ -160,8 +169,7 @@ def raddy_config(root, plain, secure, backend, proxy_backend):
     auto_https disable_redirects
 }}
 :{plain} {{
-    root {root}/public
-    file_server
+    {files}
 }}
 https://localhost {{
     tls {root}/cert.pem {root}/key.pem
@@ -174,11 +182,117 @@ https://localhost {{
         }}
     }}
     handle {{
-        root {root}/public
-        file_server
+        {files}
     }}
 }}
 '''
+
+
+def haproxy_command(binary, root, plain, secure, backend, origin, secure_backend):
+    cfg = root / "haproxy.cfg"
+    if secure_backend:
+        listeners = f'''frontend tcp_in
+    bind 127.0.0.1:{plain}
+    default_backend tcp_origin
+backend tcp_origin
+    server origin 127.0.0.1:{origin}
+frontend tls_in
+    bind 127.0.0.1:{secure}
+    tcp-request inspect-delay 2s
+    tcp-request content reject if {{ req.ssl_hello_type 1 }} !{{ req.ssl_sni -i localhost }}
+    tcp-request content accept if {{ req.ssl_hello_type 1 }}
+    default_backend tls_origin
+backend tls_origin
+    server origin 127.0.0.1:{secure_backend}
+'''
+    else:
+        pem = root / "haproxy.pem"
+        pem.write_bytes((root / "cert.pem").read_bytes() + (root / "key.pem").read_bytes())
+        listeners = f'''frontend http_in
+    bind 127.0.0.1:{plain}
+    default_backend files
+frontend https_in
+    bind 127.0.0.1:{secure} ssl crt {pem} alpn http/1.1 ssl-min-ver TLSv1.3
+    use_backend echo if {{ path /proxy }}
+    default_backend files
+backend files
+    server origin 127.0.0.1:{origin}
+backend echo
+    server origin 127.0.0.1:{backend}
+'''
+    cfg.write_text(f'''global
+    nbthread 1
+    maxconn 4096
+defaults
+    mode {"tcp" if secure_backend else "http"}
+    timeout connect 2s
+    timeout client 30s
+    timeout server 30s
+    retries 0
+{listeners}''')
+    return [binary, "-db", "-f", str(cfg)]
+
+
+def traefik_command(binary, root, plain, secure, backend, origin, secure_backend):
+    cfg = root / "traefik.toml"
+    dynamic = root / "traefik-dynamic.toml"
+    cfg.write_text(f'''[log]
+  level = "ERROR"
+[entryPoints.web]
+  address = "127.0.0.1:{plain}"
+[entryPoints.websecure]
+  address = "127.0.0.1:{secure}"
+[providers.file]
+  filename = "{dynamic}"
+  watch = false
+''')
+    if secure_backend:
+        dynamic.write_text(f'''[tcp.routers.plain]
+  entryPoints = ["web"]
+  rule = "HostSNI(`*`)"
+  service = "plain"
+[tcp.routers.secure]
+  entryPoints = ["websecure"]
+  rule = "HostSNI(`localhost`)"
+  service = "secure"
+  [tcp.routers.secure.tls]
+    passthrough = true
+[[tcp.services.plain.loadBalancer.servers]]
+  address = "127.0.0.1:{origin}"
+[[tcp.services.secure.loadBalancer.servers]]
+  address = "127.0.0.1:{secure_backend}"
+[tls.options.default]
+  sniStrict = true
+''')
+    else:
+        dynamic.write_text(f'''[http.routers.plain]
+  entryPoints = ["web"]
+  rule = "PathPrefix(`/`)"
+  service = "files"
+[http.routers.secure]
+  entryPoints = ["websecure"]
+  rule = "PathPrefix(`/`)"
+  priority = 1
+  service = "files"
+  [http.routers.secure.tls]
+[http.routers.post]
+  entryPoints = ["websecure"]
+  rule = "Path(`/proxy`)"
+  priority = 2
+  service = "echo"
+  [http.routers.post.tls]
+[[http.services.files.loadBalancer.servers]]
+  url = "http://127.0.0.1:{origin}"
+[[http.services.echo.loadBalancer.servers]]
+  url = "http://127.0.0.1:{backend}"
+[tls.options.default]
+  minVersion = "VersionTLS13"
+  alpnProtocols = ["http/1.1"]
+[[tls.certificates]]
+  certFile = "{root}/cert.pem"
+  keyFile = "{root}/key.pem"
+''')
+    return [binary, f"--configFile={cfg}"]
 
 
 def layer4_command(implementation, binary, root, plain, secure, backend, secure_backend, stream_module):
@@ -281,7 +395,7 @@ end
             threading.Thread(target=server.serve_forever, daemon=True).start()
             stack.callback(server.shutdown)
             backends.append(server.server_address[1])
-        if args.layer4:
+        if args.layer4 or args.http_relay:
             tcp_backend, tls_backend = distinct_ports(*backends)
             cfg = root / "backend.conf"
             cfg.write_text(nginx_config(root, tcp_backend, tls_backend, backends[0]))
@@ -294,35 +408,47 @@ end
                     "nginx": subprocess.run([args.nginx, "-v"], capture_output=True, text=True, check=True).stderr.strip()}
         if args.caddy:
             versions["caddy"] = subprocess.check_output([args.caddy, "version"], text=True).strip()
+        if args.traefik:
+            versions["traefik"] = subprocess.check_output([args.traefik, "version"], text=True).splitlines()[0].split()[-1]
+        if args.haproxy:
+            versions["haproxy"] = subprocess.check_output([args.haproxy, "-v"], text=True).splitlines()[0]
         if args.baseline:
             versions["raddy-baseline"] = subprocess.check_output([args.baseline, "--version"], text=True).strip()
         print(json.dumps({**versions,
                           "kernel": os.uname().release, "machine": os.uname().machine,
                           "available_cpus": len(cpus), "server_cpus": 1, "generator_cpus": 1,
                           "backend_cpu": cpus[2], "seconds": args.seconds, "connections": args.connections,
-                          "runs": args.runs, "mode": "layer4" if args.layer4 else "http"}), flush=True)
+                          "runs": args.runs, "mode": "layer4" if args.layer4 else "http-relay" if args.http_relay else "http"}), flush=True)
         implementations = [("nginx", args.nginx), ("raddy", args.raddy)]
         if args.caddy:
             implementations.insert(0, ("caddy", args.caddy))
+        for name, binary in (("traefik", args.traefik), ("haproxy", args.haproxy)):
+            if binary:
+                implementations.insert(-1, (name, binary))
         if args.baseline:
             implementations.insert(-1, ("raddy-baseline", args.baseline))
-        occupied = backends + ([tcp_backend, tls_backend] if args.layer4 else [])
+        occupied = backends + ([tcp_backend, tls_backend] if args.layer4 or args.http_relay else [])
+        origin = tcp_backend if args.http_relay else None
         for implementation, binary in implementations:
             plain, secure = distinct_ports(*occupied)
-            if args.layer4:
+            if implementation in ("traefik", "haproxy"):
+                factory = traefik_command if implementation == "traefik" else haproxy_command
+                cmd = factory(binary, root, plain, secure, backends[0], tcp_backend,
+                              tls_backend if args.layer4 else None)
+            elif args.layer4:
                 cmd = layer4_command(implementation, binary, root, plain, secure, tcp_backend,
                                      tls_backend, args.nginx_stream_module)
             elif implementation == "nginx":
                 cfg = root / "nginx.conf"
-                cfg.write_text(nginx_config(root, plain, secure, backends[0]))
+                cfg.write_text(nginx_config(root, plain, secure, backends[0], origin))
                 cmd = [binary, "-p", str(root), "-c", str(cfg), "-g", "daemon off;"]
             elif implementation == "caddy":
                 cfg = root / "Caddyfile"
-                cfg.write_text(caddy_config(root, plain, secure, backends[0]))
+                cfg.write_text(caddy_config(root, plain, secure, backends[0], origin))
                 cmd = [binary, "run", "--config", str(cfg)]
             else:
                 cfg = root / "Raddyfile"
-                cfg.write_text(raddy_config(root, plain, secure, *backends))
+                cfg.write_text(raddy_config(root, plain, secure, *backends, origin))
                 cmd = [binary, "--config", str(cfg), "run", "--grace-period-secs", "0"]
             with (root / f"{implementation}.log").open("w+") as log:
                 process = subprocess.Popen(["taskset", "-c", str(cpus[0]), *cmd], stdout=log, stderr=subprocess.STDOUT,
@@ -342,6 +468,10 @@ end
                                  ("tcp-reconnect", "new", f"http://localhost:{plain}/sample"),
                                  ("tls-passthrough-keepalive", "keep", f"https://localhost:{secure}/sample"),
                                  ("tls-passthrough-reconnect", "new", f"https://localhost:{secure}/sample")]
+                    elif args.http_relay:
+                        cases[:3] = [("http-proxy-keepalive", "keep", f"http://localhost:{plain}/sample"),
+                                     ("https-proxy-keepalive", "keep", f"https://localhost:{secure}/sample"),
+                                     ("https-proxy-reconnect", "new", f"https://localhost:{secure}/sample")]
                     elif implementation in ("raddy", "raddy-baseline"):
                         cases.append(("streaming-post-proxy-v1", "post", f"https://localhost:{secure}/proxy-pp"))
                     for label, script, url in cases:
@@ -395,6 +525,9 @@ def assert_sni_rejected(port, cert):
                 raise AssertionError("Proxy forwarded an unmatched TLS SNI")
         except (ssl.SSLEOFError, ConnectionResetError):
             pass
+        except ssl.SSLError as error:
+            if error.reason != "TLSV1_UNRECOGNIZED_NAME":
+                raise
 
 
 def sys_is_linux():
@@ -405,14 +538,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("raddy", type=lambda path: str(Path(path).resolve()))
     parser.add_argument("--nginx", default="nginx")
-    parser.add_argument("--caddy", type=lambda path: str(Path(path).resolve()) if "/" in path else path,
-                        help="Include Caddy using this binary")
+    def binary(path):
+        return str(Path(path).resolve()) if "/" in path else path
+
+    parser.add_argument("--caddy", type=binary, help="Include Caddy using this binary")
+    parser.add_argument("--traefik", type=binary, help="Include Traefik using this binary")
+    parser.add_argument("--haproxy", type=binary, help="Include HAProxy using this binary")
     parser.add_argument("--baseline", type=lambda path: str(Path(path).resolve()))
     parser.add_argument("--case", action="append", choices=("http-static", "tls-keepalive", "tls-reconnect",
                                                              "streaming-post", "streaming-post-proxy-v1",
                                                              "tcp-keepalive", "tcp-reconnect",
-                                                             "tls-passthrough-keepalive", "tls-passthrough-reconnect"))
-    parser.add_argument("--layer4", action="store_true", help="Compare TCP proxies and SNI-routed TLS passthrough")
+                                                             "tls-passthrough-keepalive", "tls-passthrough-reconnect",
+                                                             "http-proxy-keepalive", "https-proxy-keepalive",
+                                                             "https-proxy-reconnect"))
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--layer4", action="store_true", help="Compare TCP proxies and SNI-routed TLS passthrough")
+    modes.add_argument("--http-relay", action="store_true", help="Use the same HTTP origin for all proxies")
     parser.add_argument("--nginx-stream-module", type=lambda path: Path(path).resolve())
     parser.add_argument("--seconds", type=int, default=8)
     parser.add_argument("--connections", type=int, default=32)
@@ -422,6 +563,12 @@ if __name__ == "__main__":
         parser.error("seconds, connections and runs must be positive")
     if args.layer4 and not args.nginx_stream_module:
         parser.error("--layer4 requires --nginx-stream-module")
-    if args.case and any((case.startswith(("tcp-", "tls-passthrough-"))) != args.layer4 for case in args.case):
-        parser.error("use --layer4 only with TCP and TLS passthrough cases")
+    if (args.traefik or args.haproxy) and not (args.layer4 or args.http_relay):
+        parser.error("Traefik and HAProxy require --http-relay or --layer4")
+    layer4_cases = {"tcp-keepalive", "tcp-reconnect", "tls-passthrough-keepalive", "tls-passthrough-reconnect"}
+    relay_cases = {"http-proxy-keepalive", "https-proxy-keepalive", "https-proxy-reconnect", "streaming-post"}
+    native_cases = {"http-static", "tls-keepalive", "tls-reconnect", "streaming-post", "streaming-post-proxy-v1"}
+    allowed = layer4_cases if args.layer4 else relay_cases if args.http_relay else native_cases
+    if args.case and not set(args.case) <= allowed:
+        parser.error("selected cases do not belong to this benchmark mode")
     main(args)

@@ -73,7 +73,9 @@ docker compose run --rm raddy validate
 docker compose up -d
 ```
 
-Validation checks the configuration and configured PEM files, but does not contact the certificate authority. Before deploying, test issuance against ACME staging and keep a backup of `data_dir` outside the source tree. To use existing PEM files instead of ACME, set `tls /path/to/cert.pem /path/to/key.pem` in the site block.
+Validation compiles the HTTP handlers, checks their filesystem roots and validates configured PEM files. It neither binds ports nor contacts the certificate authority. Before deploying, test issuance against ACME staging and keep a backup of `data_dir` outside the source tree. To use existing PEM files instead of ACME, set `tls /path/to/cert.pem /path/to/key.pem` in the site block.
+
+Automatic certificate caches are isolated by ACME directory URL. Bundles from versions without that separation are not used automatically; the first start after upgrading can require fresh issuance. Raddy records pending DNS‑01 TXT cleanup in `data_dir` and retries it on start and during renewal when Cloudflare credentials are configured.
 
 ## Routing, TLS passthrough, and PROXY protocol
 
@@ -99,6 +101,9 @@ Enable outgoing `proxy_protocol v1` or `proxy_protocol v2` inside `proxy` or `re
 
 ## Operating Raddy
 
+- Raddy uses one HTTP and one HTTPS listener. Sites that share a listener must agree on the effective `bind` address (the explicit site address, the global `http_addr`/`https_addr`, or `default_bind`). Conflicting addresses and duplicate site names on the same protocol are rejected.
+- In Caddyfile syntax, `root` sets a directory but does not serve it on its own: add `file_server`. In the legacy JSON site format, `root` still enables static serving.
+- The proxy's `request_timeout` limits the wait for origin headers while upload progress is idle, then the pause between response frames. An active upload can take longer than this setting. Before origin headers, an idle timeout produces `504`; after headers it ends the response stream.
 - On Unix, send `SIGUSR1` to reload configuration and imported files (`docker compose kill -s SIGUSR1 raddy`). If the reload fails, the old configuration remains active. Established TCP, TLS passthrough, and WebSocket tunnels are preserved during reload.
 - On `SIGTERM` or `SIGINT`, Raddy stops accepting new connections and gives active traffic up to 30 seconds to finish by default. Use `run --grace-period-secs` to adjust this and give the container a longer `stop_grace_period`.
 - The global `max_connections` option limits accepted client TCP connections across ports (`0` disables the limit). It does not limit HTTP/2 streams or account for upstream file descriptors. Set host file-descriptor limits and load-test with your expected workload.
@@ -113,6 +118,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 cargo build --locked --release
 python3 tests/network.py target/release/raddy
+python3 -B tests/http_proxy.py target/release/raddy
 # With Caddy 2.10.2 on PATH:
 python3 tests/caddy_parity.py target/release/raddy
 ```

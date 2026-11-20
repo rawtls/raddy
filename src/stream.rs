@@ -58,6 +58,18 @@ impl AsyncWrite for BufferedStream {
     ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(context, buffer)
     }
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+        buffers: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(context, buffers)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+
     fn poll_flush(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.inner).poll_flush(context)
     }
@@ -504,13 +516,14 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     start: Instant,
     last_write: &AtomicU64,
 ) -> io::Result<()> {
-    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut buffer = BytesMut::with_capacity(8 * 1024);
     loop {
-        let count = reader.read(&mut buffer).await?;
+        buffer.clear();
+        let count = reader.read_buf(&mut buffer).await?;
         if count == 0 {
             return writer.shutdown().await;
         }
-        let mut pending = &buffer[..count];
+        let mut pending = &buffer[..];
         while !pending.is_empty() {
             let sent = writer.write(pending).await?;
             if sent == 0 {
@@ -521,6 +534,9 @@ async fn copy_direction<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 Ordering::Relaxed,
             );
             pending = &pending[sent..];
+        }
+        if count == buffer.capacity() && count < 64 * 1024 {
+            buffer.reserve(count);
         }
     }
 }
@@ -693,6 +709,39 @@ mod tests {
                 .to_string()
                 .contains(&address.to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn relay_preserves_large_writes_and_half_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (client, relay) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let (mut client, (mut downstream, _)) = (client.unwrap(), relay.unwrap());
+        let (backend, relay) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let (mut backend, (mut upstream, _)) = (backend.unwrap(), relay.unwrap());
+        let payload: Vec<u8> = (0..1_000_003).map(|i| (i % 251) as u8).collect();
+        timeout(Duration::from_secs(10), async {
+            let upload = async {
+                client.write_all(&payload).await.unwrap();
+                client.shutdown().await.unwrap();
+                let mut response = Vec::new();
+                client.read_to_end(&mut response).await.unwrap();
+                assert_eq!(response, payload);
+            };
+            let echo = async {
+                let mut body = Vec::new();
+                backend.read_to_end(&mut body).await.unwrap();
+                assert_eq!(body, payload);
+                backend.write_all(&body).await.unwrap();
+                backend.shutdown().await.unwrap();
+            };
+            let relay =
+                copy_bidirectional_idle(&mut downstream, &mut upstream, Duration::from_secs(3));
+            let (_, _, result) = tokio::join!(upload, echo, relay);
+            result.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

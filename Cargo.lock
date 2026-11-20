@@ -1458,7 +1458,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "raddy"
-version = "0.3.0"
+version = "0.4.0-rc.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1485,7 +1485,6 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "socket2",
@@ -1685,15 +1684,6 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
-]
-
-[[package]]
-name = "rustls-pemfile"
-version = "2.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
-dependencies = [
- "rustls-pki-types",
 ]
 
 [[package]]

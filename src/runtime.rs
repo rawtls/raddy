@@ -306,10 +306,10 @@ impl Runtime {
                     Ok(Arc::new(Cloudflare::new(config.cloudflare_config()?)?))
                 })
                 .transpose()?;
-            let server = Arc::new(Server::new(config)?);
+            let server = Arc::new(tokio::task::spawn_blocking(move || Server::new(config)).await??);
             if let Some(https) = https {
                 let acceptor = server
-                    .tls_acceptor(cloudflare)
+                    .tls_acceptor(cloudflare, &drain)
                     .await?
                     .context("HTTPS listener requires TLS")?;
                 stream_ports.entry(https).or_default().https = Some(HttpsEndpoint {

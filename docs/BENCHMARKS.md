@@ -1,6 +1,6 @@
 # Raddy, Caddy, and nginx benchmarks
 
-[Home](../README.md) · [Главная](../README.ru.md) · [Raw results](benchmarks/results.jsonl) · [Benchmark script](../tests/benchmark.py)
+[Home](../README.md) · [Five-server reverse proxy comparison](BENCHMARKS.proxy.md) · [TCP and TLS passthrough](BENCHMARKS.layer4.md) · [Raw results](benchmarks/results.jsonl) · [Benchmark script](../tests/benchmark.py)
 
 ![Median throughput in requests per second for Raddy, Caddy, and nginx across four workloads](benchmarks/throughput.svg)
 

@@ -28,7 +28,7 @@ docker run --rm -p 127.0.0.1:8080:8080 \
 
 - [Включить HTTPS через Cloudflare DNS-01](docs/CONFIGURATION.md#cloudflare-dns-01)
 - [Настроить TCP и TLS passthrough](docs/CONFIGURATION.ru.md#tcp-и-tls-passthrough)
-- Сравнить Raddy, Caddy и nginx: [HTTP/HTTPS](docs/BENCHMARKS.md) · [TCP/TLS passthrough](docs/BENCHMARKS.layer4.md)
+- Сравнить Raddy, Caddy, nginx, Traefik и HAProxy: [HTTP/HTTPS-прокси](docs/BENCHMARKS.proxy.md) · [TCP/TLS passthrough](docs/BENCHMARKS.layer4.md). Отдельно — [прямая раздача статики](docs/BENCHMARKS.md).
 
 Проект развивается. Поддержка синтаксиса Caddyfile частичная: Raddy [не является полной заменой Caddy](docs/CONFIGURATION.ru.md#границы-совместимости).
 

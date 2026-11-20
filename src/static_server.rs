@@ -32,20 +32,23 @@ pub async fn serve_connection_with_drain(
     connections: crate::runtime::Connections,
 ) -> Result<(), BoxError> {
     let mut stream = stream;
-    let _ = stream.set_nodelay(false);
     let mut buffer = BytesMut::with_capacity(16 * 1024);
     loop {
-        let request = tokio::select! {
+        let read = tokio::select! {
             biased;
             _ = connections.drain.cancelled() => return Ok(()),
             result = read_request(&mut stream, &mut buffer, server.max_header_size()) => result?,
         };
-        let Some(request) = request else {
-            return Ok(());
+        let (request, files) = match read {
+            ReadRequest::Closed => return Ok(()),
+            ReadRequest::Delegate => (None, None),
+            ReadRequest::Parsed(request) => {
+                let host = request.host.as_deref().unwrap_or_default();
+                let files = server.static_site(host, &request.path).cloned();
+                (Some(request), files)
+            }
         };
-        let host = request.host.as_deref().unwrap_or_default();
-        let site = server.static_site(host, &request.path);
-        if site.is_none() {
+        let (Some(request), Some(files)) = (request, files) else {
             let stream = BufferedStream::new(buffer.freeze(), stream);
             return super::server::serve_connection_with_drain(
                 stream,
@@ -55,7 +58,7 @@ pub async fn serve_connection_with_drain(
                 connections,
             )
             .await;
-        }
+        };
         buffer.advance(request.consumed);
         let close = request.close || request.has_body || connections.drain.is_cancelled();
         if request.has_body {
@@ -63,6 +66,7 @@ pub async fn serve_connection_with_drain(
                 &mut stream,
                 StatusCode::BAD_REQUEST,
                 "request body is not supported for static files\n",
+                request.method == StaticMethod::Head,
             )
             .await?;
             return Ok(());
@@ -72,11 +76,11 @@ pub async fn serve_connection_with_drain(
                 &mut stream,
                 StatusCode::METHOD_NOT_ALLOWED,
                 "method not allowed\n",
+                false,
             )
             .await?;
             return Ok(());
         }
-        let files = site.expect("static route checked").clone();
         match files.resolve(&request.path).await {
             Ok(file) => {
                 let head = request.method == StaticMethod::Head;
@@ -95,7 +99,13 @@ pub async fn serve_connection_with_drain(
                 .await?;
             }
             Err(error) => {
-                write_error(&mut stream, error.status(), error.message()).await?;
+                write_error(
+                    &mut stream,
+                    error.status(),
+                    error.message(),
+                    request.method == StaticMethod::Head,
+                )
+                .await?;
                 return Ok(());
             }
         }
@@ -122,32 +132,42 @@ struct RequestHead {
     consumed: usize,
 }
 
+enum ReadRequest {
+    Closed,
+    Delegate,
+    Parsed(RequestHead),
+}
+
 async fn read_request(
     stream: &mut TcpStream,
     buffer: &mut BytesMut,
     max_size: usize,
-) -> Result<Option<RequestHead>, BoxError> {
+) -> Result<ReadRequest, BoxError> {
     if buffer.is_empty() && timeout(IDLE_TIMEOUT, stream.read_buf(buffer)).await?? == 0 {
-        return Ok(None);
+        return Ok(ReadRequest::Closed);
     }
     let mut deadline = None;
     loop {
-        match parse_request(buffer)? {
-            Some(request) if request.consumed <= max_size => return Ok(Some(request)),
-            None if buffer.len() < max_size => {}
+        match parse_request(buffer) {
+            Ok(Some(request)) if request.consumed <= max_size => {
+                return Ok(ReadRequest::Parsed(request));
+            }
+            Ok(None) if buffer.len() < max_size => {}
+            Err(_) => return Ok(ReadRequest::Delegate),
             _ => {
                 write_error(
                     stream,
                     StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
                     "request headers too large\n",
+                    false,
                 )
                 .await?;
-                return Ok(None);
+                return Ok(ReadRequest::Closed);
             }
         }
         let deadline = *deadline.get_or_insert_with(|| Instant::now() + Duration::from_secs(15));
         if timeout_at(deadline, stream.read_buf(buffer)).await?? == 0 {
-            return Ok(None);
+            return Ok(ReadRequest::Closed);
         }
     }
 }
@@ -172,7 +192,8 @@ fn parse_request(buffer: &[u8]) -> Result<Option<RequestHead>, BoxError> {
                 .authority()
                 .map(|authority| normalize_host(authority.as_str()))
                 .transpose()?;
-            let mut connection_close = minor == 0;
+            let mut connection_close = false;
+            let mut keep_alive = minor != 0;
             let mut has_body = false;
             let mut conditions: Option<HeaderMap> = None;
             for header in request.headers {
@@ -191,7 +212,7 @@ fn parse_request(buffer: &[u8]) -> Result<Option<RequestHead>, BoxError> {
                             connection_close = true;
                         }
                         if token.eq_ignore_ascii_case("keep-alive") {
-                            connection_close = false;
+                            keep_alive = true;
                         }
                     }
                 } else if header.name.eq_ignore_ascii_case("content-length") {
@@ -227,7 +248,7 @@ fn parse_request(buffer: &[u8]) -> Result<Option<RequestHead>, BoxError> {
                 },
                 path: uri.path().to_owned(),
                 host,
-                close: connection_close,
+                close: connection_close || !keep_alive,
                 has_body,
                 conditions,
                 consumed,
@@ -266,6 +287,7 @@ async fn write_error(
     stream: &mut TcpStream,
     status: StatusCode,
     message: &str,
+    head: bool,
 ) -> Result<(), BoxError> {
     let header = response_header(
         status,
@@ -275,7 +297,9 @@ async fn write_error(
         true,
     );
     stream.write_all(header.as_bytes()).await?;
-    stream.write_all(message.as_bytes()).await?;
+    if !head {
+        stream.write_all(message.as_bytes()).await?;
+    }
     Ok(())
 }
 
@@ -581,7 +605,11 @@ mod tests {
         timeout(Duration::from_secs(5), async {
             let relay = async {
                 let (stream, peer) = listener.accept().await.unwrap();
-                serve_connection(stream, server, peer).await.unwrap();
+                stream.set_nodelay(true).unwrap();
+                let socket: std::net::TcpStream = stream.into_std().unwrap();
+                let probe = socket.try_clone().unwrap();
+                serve_connection(TcpStream::from_std(socket).unwrap(), server, peer).await.unwrap();
+                assert!(probe.nodelay().unwrap());
             };
             let backend = async {
                 let (mut stream, _) = upstream.accept().await.unwrap();

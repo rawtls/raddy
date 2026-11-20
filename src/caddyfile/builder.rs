@@ -27,6 +27,11 @@ struct Builder {
     config: Config,
     stream_settings: BTreeMap<SocketAddr, StreamSettings>,
     automatic_https: bool,
+    default_bind: IpAddr,
+    http_bind: Option<IpAddr>,
+    https_bind: Option<IpAddr>,
+    global_http_bind: Option<IpAddr>,
+    global_https_bind: Option<IpAddr>,
     default_http_port: u16,
     default_https_port: u16,
     http_port_explicit: bool,
@@ -43,6 +48,11 @@ impl Builder {
             config: Config::default(),
             stream_settings: BTreeMap::new(),
             automatic_https: true,
+            default_bind: IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            http_bind: None,
+            https_bind: None,
+            global_http_bind: None,
+            global_https_bind: None,
             default_http_port: 80,
             default_https_port: 443,
             http_port_explicit: false,
@@ -76,8 +86,13 @@ impl Builder {
                 no_children(directive)?;
                 one_arg(directive)?;
                 let ip = parse_ip(args[0], &directive.args[0])?;
-                self.config.http_addr.set_ip(ip);
-                self.config.https_addr.set_ip(ip);
+                self.default_bind = ip;
+                if self.global_http_bind.is_none() {
+                    self.config.http_addr.set_ip(ip);
+                }
+                if self.global_https_bind.is_none() {
+                    self.config.https_addr.set_ip(ip);
+                }
             }
             "http_port" | "https_port" => {
                 no_children(directive)?;
@@ -109,6 +124,12 @@ impl Builder {
                     &mut self.config.http_addr
                 };
                 target.set_ip(address.ip());
+                let bind = if https {
+                    &mut self.global_https_bind
+                } else {
+                    &mut self.global_http_bind
+                };
+                *bind = Some(address.ip());
             }
             "auto_https" => {
                 no_children(directive)?;
@@ -230,6 +251,19 @@ impl Builder {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
+        let mut bind = None;
+        for child in directive
+            .children
+            .iter()
+            .filter(|child| child.name.text == "bind")
+        {
+            no_children(child)?;
+            one_arg(child)?;
+            let ip = parse_ip(&child.args[0].text, &child.args[0])?;
+            if bind.replace(ip).is_some_and(|previous| previous != ip) {
+                return Err(at(&child.name, "conflicting bind addresses in site block"));
+            }
+        }
         for tls in [false, true] {
             let hosts = parsed
                 .iter()
@@ -262,7 +296,7 @@ impl Builder {
                     > 1;
             if multiple_handlers || directive.children.iter().any(needs_http_routes) {
                 for child in &directive.children {
-                    if matches!(child.name.text.as_str(), "tls" | "bind") {
+                    if child.name.text == "tls" {
                         self.site_directive(child, &mut site, &mut false)?;
                     }
                 }
@@ -317,10 +351,14 @@ impl Builder {
             } else {
                 let mut file_server = false;
                 for child in &directive.children {
-                    self.site_directive(child, &mut site, &mut file_server)?;
+                    if child.name.text != "bind" {
+                        self.site_directive(child, &mut site, &mut file_server)?;
+                    }
                 }
-                if file_server && site.root.is_none() {
-                    site.root = Some(PathBuf::from("."));
+                if file_server {
+                    site.root.get_or_insert_with(|| PathBuf::from("."));
+                } else {
+                    site.root = None;
                 }
             }
             for address in parsed.iter().filter(|address| address.tls == tls) {
@@ -335,6 +373,11 @@ impl Builder {
                     &directive.name,
                 )?;
             }
+            if site.tls {
+                self.set_bind(true, bind, &directive.name)?;
+            } else {
+                self.set_bind(false, bind, &directive.name)?;
+            }
             self.config.sites.push(site);
         }
         Ok(())
@@ -348,7 +391,7 @@ impl Builder {
             ));
         }
         let address = stream_address(&directive.name)?;
-        let mut listen_ip = address.listen.unwrap_or(self.config.http_addr.ip());
+        let mut listen_ip = address.listen.unwrap_or(self.default_bind);
         let mut route = StreamRouteConfig {
             sni: address.sni,
             upstreams: Vec::new(),
@@ -926,13 +969,6 @@ impl Builder {
                     }
                 }
             }
-            "bind" => {
-                no_children(directive)?;
-                one_arg(directive)?;
-                let ip = parse_ip(args[0], &directive.args[0])?;
-                self.config.http_addr.set_ip(ip);
-                self.config.https_addr.set_ip(ip);
-            }
             option => {
                 return Err(at(
                     &directive.name,
@@ -940,6 +976,35 @@ impl Builder {
                 ));
             }
         }
+        Ok(())
+    }
+
+    fn set_bind(&mut self, https: bool, requested: Option<IpAddr>, token: &Token) -> Result<()> {
+        let (address, previous, global) = if https {
+            (
+                &mut self.config.https_addr,
+                &mut self.https_bind,
+                self.global_https_bind,
+            )
+        } else {
+            (
+                &mut self.config.http_addr,
+                &mut self.http_bind,
+                self.global_http_bind,
+            )
+        };
+        let ip = requested.or(global).unwrap_or(self.default_bind);
+        if previous.or(global).is_some_and(|previous| previous != ip) {
+            return Err(at(
+                token,
+                format!(
+                    "conflicting bind addresses for the {} listener",
+                    if https { "HTTPS" } else { "HTTP" }
+                ),
+            ));
+        }
+        *previous = Some(ip);
+        address.set_ip(ip);
         Ok(())
     }
 
@@ -1295,7 +1360,7 @@ struct StreamSettings {
 fn merge_stream_settings(
     target: &mut StreamConfig,
     source: &StreamConfig,
-    previous: &StreamSettings,
+    previous: &mut StreamSettings,
     specified: &StreamSettings,
     token: &Token,
 ) -> Result<()> {
@@ -1355,6 +1420,10 @@ fn merge_stream_settings(
     if specified.max_handshake_bytes {
         target.max_handshake_bytes = source.max_handshake_bytes;
     }
+    previous.connect_timeout |= specified.connect_timeout;
+    previous.idle_timeout |= specified.idle_timeout;
+    previous.handshake_timeout |= specified.handshake_timeout;
+    previous.max_handshake_bytes |= specified.max_handshake_bytes;
     Ok(())
 }
 

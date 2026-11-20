@@ -710,6 +710,50 @@ fn parses_compound_durations() {
 }
 
 #[test]
+fn listener_binds_are_independent_and_conflicts_are_rejected() {
+    let config = parse("{ default_bind 127.0.0.1 }\nhttp://a.test { bind 127.0.0.2 respond a }\nhttps://b.test { tls cert.pem key.pem respond b }\ntcp://:9999 { proxy 127.0.0.1:9000 }").unwrap();
+    assert_eq!(config.http_addr.ip().to_string(), "127.0.0.2");
+    assert_eq!(config.https_addr.ip().to_string(), "127.0.0.1");
+    assert_eq!(config.streams[0].listen.ip().to_string(), "127.0.0.1");
+    for second in ["bind 127.0.0.1 respond b", "respond b"] {
+        assert!(
+            parse(&format!(
+                "http://a.test {{ bind 127.0.0.2 respond a }}\nhttp://b.test {{ {second} }}"
+            ))
+            .is_err()
+        );
+        assert!(
+            parse(&format!(
+                "http://b.test {{ {second} }}\nhttp://a.test {{ bind 127.0.0.2 respond a }}"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn root_without_file_server_does_not_enable_static_files() {
+    let config = parse("http://a.test { root ./public }").unwrap();
+    assert!(config.sites[0].root.is_none());
+    let config = parse("http://a.test { root ./public file_server }").unwrap();
+    assert_eq!(config.sites[0].root, Some(PathBuf::from("./public")));
+}
+
+#[test]
+fn duplicate_sites_and_late_tls_stream_conflicts_are_rejected() {
+    assert!(parse("http://a.test { respond one }\nhttp://A.test. { respond two }").is_err());
+    let first = "tls://a.test:9443 { proxy 127.0.0.1:9000 }";
+    let second = "tls://b.test:9443 { handshake_timeout 2s proxy 127.0.0.1:9000 }";
+    let third = "tls://c.test:9443 { handshake_timeout 3s proxy 127.0.0.1:9000 }";
+    assert!(
+        parse(&format!("{first}\n{second}\n{third}"))
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting handshake_timeout")
+    );
+}
+
+#[test]
 fn inline_header_and_default_port_keep_their_meaning() {
     let config = parse("http://a.test:80 {\n header X-Test hello\n root .\n}").unwrap();
     assert_eq!(config.http_addr.port(), 80);

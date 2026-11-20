@@ -15,7 +15,12 @@ use instant_acme::{
     Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
     NewOrder, OrderStatus, RetryPolicy,
 };
-use rustls::{crypto::CryptoProvider, server::ResolvesServerCert, sign::CertifiedKey};
+use rustls::{
+    crypto::CryptoProvider,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
+    server::ResolvesServerCert,
+    sign::CertifiedKey,
+};
 use std::sync::RwLock;
 
 use tokio::sync::OnceCell;
@@ -33,7 +38,6 @@ pub struct CertificateStore {
     certificates: RwLock<HashMap<String, Arc<CertifiedKey>>>,
     config: Arc<Config>,
     cloudflare: Option<Arc<Cloudflare>>,
-    issuances: tokio::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
     account: OnceCell<Account>,
 }
 
@@ -43,7 +47,6 @@ impl CertificateStore {
             certificates: RwLock::new(HashMap::new()),
             config,
             cloudflare,
-            issuances: tokio::sync::Mutex::new(HashMap::new()),
             account: OnceCell::new(),
         })
     }
@@ -53,6 +56,7 @@ impl CertificateStore {
     }
 
     pub async fn provision(&self) -> Result<()> {
+        self.retry_cleanup().await;
         for site in self.config.sites.iter().filter(|site| site.tls) {
             match self.load_or_issue(&site.hosts).await {
                 Ok(certificate) => {
@@ -85,36 +89,40 @@ impl CertificateStore {
         Ok(())
     }
 
-    pub fn spawn_renewals(self: &Arc<Self>) {
+    pub fn spawn_renewals(self: &Arc<Self>, stop: tokio_util::sync::CancellationToken) {
         let store = Arc::downgrade(self);
         tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(RENEW_INTERVAL).await;
-                let Some(store) = store.upgrade() else {
-                    break;
-                };
-                for site in store
-                    .config
-                    .sites
-                    .iter()
-                    .filter(|site| site.tls && site.certificate_file.is_none())
-                {
-                    match store.load_or_issue(&site.hosts).await {
-                        Ok(certificate) => {
-                            let mut certificates = store
-                                .certificates
-                                .write()
-                                .expect("certificate store lock poisoned");
-                            for host in &site.hosts {
-                                certificates.insert(normalize_host(host), certificate.clone());
+            let renew = async {
+                loop {
+                    tokio::time::sleep(RENEW_INTERVAL).await;
+                    let Some(store) = store.upgrade() else {
+                        break;
+                    };
+                    store.retry_cleanup().await;
+                    for site in store
+                        .config
+                        .sites
+                        .iter()
+                        .filter(|site| site.tls && site.certificate_file.is_none())
+                    {
+                        match store.load_or_issue(&site.hosts).await {
+                            Ok(certificate) => {
+                                let mut certificates = store
+                                    .certificates
+                                    .write()
+                                    .expect("certificate store lock poisoned");
+                                for host in &site.hosts {
+                                    certificates.insert(normalize_host(host), certificate.clone());
+                                }
                             }
-                        }
-                        Err(error) => {
-                            warn!(hosts = ?site.hosts, %error, "scheduled certificate renewal failed")
+                            Err(error) => {
+                                warn!(hosts = ?site.hosts, %error, "scheduled certificate renewal failed")
+                            }
                         }
                     }
                 }
-            }
+            };
+            tokio::select! { _ = stop.cancelled() => {}, _ = renew => {} }
         });
     }
 
@@ -132,16 +140,7 @@ impl CertificateStore {
         }) {
             return load_pem_pair(certificate_path, key_path, hosts).await;
         }
-        let directory = self.certificate_directory(hosts);
-        let lock = {
-            self.issuances
-                .lock()
-                .await
-                .entry(directory)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        };
-        let _issuance = lock.lock().await;
+        let _issuance = acquire_issuance_lock(&self.config.data_dir).await?;
         if let Some(certificate) = self.load_existing(hosts).await
             && certificate_lifetime(&certificate).is_ok_and(|remaining| remaining > RENEW_BEFORE)
             && certificate_covers_hosts(&certificate, hosts).is_ok()
@@ -199,11 +198,12 @@ impl CertificateStore {
             .map(|host| host.replace('*', "_wildcard_"))
             .unwrap_or_else(|| "default".to_owned());
         let digest = ring::digest::digest(&ring::digest::SHA256, hosts.join("\0").as_bytes());
-        self.config.data_dir.join("certificates").join(format!(
-            "{}-{}",
-            name,
-            &hex_digest(digest.as_ref())[..16]
-        ))
+        let ca = ring::digest::digest(&ring::digest::SHA256, self.config.acme_ca.as_bytes());
+        self.config
+            .data_dir
+            .join("certificates")
+            .join(hex_digest(ca.as_ref()))
+            .join(format!("{}-{}", name, &hex_digest(digest.as_ref())[..16]))
     }
 
     async fn account(&self) -> Result<&Account> {
@@ -298,10 +298,16 @@ impl CertificateStore {
                         ttl: 120,
                         ..DnsRecord::txt(challenge_name.clone(), value.clone())
                     };
+                    let pending = PendingChallenge {
+                        zone: zone.name,
+                        record,
+                    };
+                    let path = self.remember_challenge(&pending).await?;
+                    cleanup.push((path, pending));
+                    let (_, pending) = cleanup.last().expect("challenge just recorded");
                     cloudflare
-                        .append_records(&zone.name, vec![record.clone()])
+                        .append_records(&pending.zone, vec![pending.record.clone()])
                         .await?;
-                    cleanup.push((zone.name, record));
                     wait_for_txt(&challenge_name, &value).await?;
                     challenge.set_ready().await?;
                 }
@@ -315,13 +321,123 @@ impl CertificateStore {
             Ok((certificate, private_key))
         }
         .await;
-        for (zone, record) in cleanup {
-            if let Err(error) = cloudflare.delete_records(&zone, vec![record]).await {
-                warn!(%error, "failed to clean up an ACME DNS record");
+        for (path, pending) in cleanup {
+            if let Err(error) = remove_challenge(cloudflare, &path, pending).await {
+                warn!(%error, "ACME DNS cleanup deferred");
             }
         }
         operation
     }
+
+    fn cleanup_directory(&self) -> PathBuf {
+        self.config.data_dir.join("acme-cleanup")
+    }
+
+    async fn remember_challenge(&self, pending: &PendingChallenge) -> Result<PathBuf> {
+        let directory = self.cleanup_directory();
+        tokio::fs::create_dir_all(&directory).await?;
+        let contents = serde_json::to_vec(pending)?;
+        let hash = ring::digest::digest(&ring::digest::SHA256, &contents);
+        let path = directory
+            .join(hex_digest(hash.as_ref()))
+            .with_extension("json");
+        write_atomic(&path, &contents, true).await?;
+        Ok(path)
+    }
+
+    async fn retry_cleanup(&self) {
+        let Some(cloudflare) = &self.cloudflare else {
+            return;
+        };
+        let result = async {
+            let _issuance = acquire_issuance_lock(&self.config.data_dir).await?;
+            let mut entries = match tokio::fs::read_dir(self.cleanup_directory()).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().is_none_or(|ext| ext != "json")
+                    || !entry.file_type().await?.is_file()
+                {
+                    continue;
+                }
+                let result = async {
+                    let pending: PendingChallenge =
+                        serde_json::from_slice(&tokio::fs::read(&path).await?)?;
+                    remove_challenge(cloudflare, &path, pending).await
+                }
+                .await;
+                if let Err(error) = result {
+                    warn!(%error, "ACME DNS cleanup remains pending");
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            warn!(%error, "could not recover pending ACME DNS cleanup");
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingChallenge {
+    zone: String,
+    record: DnsRecord,
+}
+
+async fn remove_challenge(
+    cloudflare: &Cloudflare,
+    path: &Path,
+    pending: PendingChallenge,
+) -> Result<()> {
+    if pending.record.kind != "TXT"
+        || !pending.record.name.starts_with("_acme-challenge.")
+        || pending.record.content.is_empty()
+    {
+        bail!("invalid pending ACME DNS cleanup record");
+    }
+    cloudflare
+        .delete_records(&pending.zone, vec![pending.record])
+        .await?;
+    tokio::fs::remove_file(path).await?;
+    Ok(())
+}
+
+async fn acquire_issuance_lock(directory: &Path) -> Result<std::fs::File> {
+    tokio::fs::create_dir_all(directory).await?;
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join("acme.lock"))
+        .await?
+        .into_std()
+        .await;
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        loop {
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(100)).await
+                }
+                _ => return Err(error.into()),
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    bail!("automatic ACME certificates require a Unix file lock");
+    #[cfg(unix)]
+    Ok(file)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -356,13 +472,13 @@ fn parse_certified_key(
     certificate_pem: &[u8],
     private_key_pem: &[u8],
 ) -> Result<Arc<CertifiedKey>> {
-    let certificates = rustls_pemfile::certs(&mut std::io::BufReader::new(certificate_pem))
-        .collect::<std::io::Result<Vec<_>>>()?;
+    let certificates =
+        CertificateDer::pem_slice_iter(certificate_pem).collect::<Result<Vec<_>, _>>()?;
     if certificates.is_empty() {
         bail!("certificate PEM contains no certificates");
     }
-    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(private_key_pem))?
-        .ok_or_else(|| anyhow!("private key PEM contains no supported keys"))?;
+    let key = PrivateKeyDer::from_pem_slice(private_key_pem)
+        .context("could not parse private key PEM")?;
     let provider = CryptoProvider::get_default()
         .ok_or_else(|| anyhow!("Rustls crypto provider is not installed"))?;
     let certificate = CertifiedKey::from_der(certificates, key, provider)?;
@@ -509,7 +625,15 @@ async fn write_atomic(path: &Path, contents: &[u8], secret: bool) -> Result<()> 
     if result.is_err() {
         let _ = tokio::fs::remove_file(&temporary).await;
     }
-    result.map_err(Into::into)
+    result?;
+    #[cfg(unix)]
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+    }
+    Ok(())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
@@ -538,6 +662,129 @@ mod tests {
         assert!(!dns_pattern_matches("*.example.com", "example.com"));
         assert!(!dns_pattern_matches("*.example.com", "a.b.example.com"));
         assert!(!dns_pattern_matches("example.com", "notexample.com"));
+    }
+
+    #[tokio::test]
+    async fn certificate_cache_isolated_by_ca() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let root = std::env::temp_dir().join(format!("raddy-acme-ca-{}", std::process::id()));
+        let hosts = ["example.test".to_owned()];
+        let production = super::CertificateStore::new(
+            std::sync::Arc::new(super::Config {
+                data_dir: root.clone(),
+                ..Default::default()
+            }),
+            None,
+        );
+        let staging = super::CertificateStore::new(
+            std::sync::Arc::new(super::Config {
+                data_dir: root.clone(),
+                acme_ca: "https://staging.example.test/directory".to_owned(),
+                ..Default::default()
+            }),
+            None,
+        );
+        let dir = staging.certificate_directory(&hosts);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let certificate = rcgen::generate_simple_self_signed(hosts.to_vec()).unwrap();
+        let bundle = format!(
+            "{}\n{}",
+            certificate.cert.pem(),
+            certificate.signing_key.serialize_pem()
+        );
+        write_atomic(&dir.join("bundle.pem"), bundle.as_bytes(), true)
+            .await
+            .unwrap();
+        assert!(staging.load_existing(&hosts).await.is_some());
+        assert!(production.load_existing(&hosts).await.is_none());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cleanup_recovers_journal_on_restart() {
+        use http_body_util::Full;
+        use hyper::{Response, server::conn::http1, service::service_fn};
+        use hyper_util::rt::TokioIo;
+        use serde_json::json;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        let root = std::env::temp_dir().join(format!("raddy-acme-cleanup-{}", std::process::id()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut settings = crate::cloudflare::CloudflareConfig::new("a".repeat(40));
+        settings.api_base = format!("http://{}", listener.local_addr().unwrap());
+        settings.retries = 0;
+        let deletes = Arc::new(AtomicUsize::new(0));
+        let seen = deletes.clone();
+        let server = tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let seen = seen.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(
+                        move |request: hyper::Request<hyper::body::Incoming>| {
+                            let seen = seen.clone();
+                            async move {
+                                let (success, result) = match (
+                                    request.method().as_str(),
+                                    request.uri().path(),
+                                ) {
+                                    ("GET", "/zones") => {
+                                        (true, json!([{"id":"zone","name":"example.test"}]))
+                                    }
+                                    ("GET", "/zones/zone/dns_records") => (
+                                        true,
+                                        json!([
+                                            {"id":"stale","type":"TXT","name":"_acme-challenge.example.test","content":"pending"},
+                                            {"id":"other","type":"TXT","name":"_acme-challenge.example.test","content":"unrelated"}
+                                        ]),
+                                    ),
+                                    ("DELETE", "/zones/zone/dns_records/stale") => (
+                                        seen.fetch_add(1, Ordering::Relaxed) != 0,
+                                        json!({"id":"stale"}),
+                                    ),
+                                    _ => (false, json!(null)),
+                                };
+                                Ok::<_, std::convert::Infallible>(Response::new(Full::new(
+                                    bytes::Bytes::from(
+                                        json!({"success":success,"result":result}).to_string(),
+                                    ),
+                                )))
+                            }
+                        },
+                    );
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(socket), service)
+                        .await;
+                });
+            }
+        });
+        let config = Arc::new(super::Config {
+            data_dir: root.clone(),
+            ..Default::default()
+        });
+        let store = super::CertificateStore::new(config.clone(), None);
+        let path = store
+            .remember_challenge(&super::PendingChallenge {
+                zone: "example.test".to_owned(),
+                record: super::DnsRecord::txt("_acme-challenge.example.test", "pending"),
+            })
+            .await
+            .unwrap();
+        drop(store);
+        let client = Arc::new(super::Cloudflare::new(settings).unwrap());
+        let store = super::CertificateStore::new(config.clone(), Some(client.clone()));
+        store.retry_cleanup().await;
+        assert!(path.exists());
+        drop(store);
+        super::CertificateStore::new(config, Some(client))
+            .retry_cleanup()
+            .await;
+        assert!(!path.exists());
+        assert_eq!(deletes.load(Ordering::Relaxed), 2);
+        server.abort();
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
     #[test]

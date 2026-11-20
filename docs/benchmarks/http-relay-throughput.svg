@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 632" width="960" height="632" role="img" aria-labelledby="title description">
+<title id="title">Throughput</title>
+<desc id="description">Median requests per second · higher is better Numeric results are also available in the benchmark table.</desc>
+<rect width="960" height="632" rx="20" fill="#0f172a"/>
+<g font-family="system-ui, -apple-system, sans-serif">
+<text x="28" y="47" fill="#f8fafc" font-size="28" font-weight="700" text-anchor="start">Throughput</text>
+<text x="28" y="75" fill="#b0bfd8" font-size="14" font-weight="400" text-anchor="start">Median requests per second · higher is better</text>
+<circle cx="470" cy="38" r="5" fill="#34d399"/>
+<text x="483" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Raddy</text>
+<circle cx="566" cy="38" r="5" fill="#7dd3fc"/>
+<text x="579" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Caddy</text>
+<circle cx="662" cy="38" r="5" fill="#fbbf24"/>
+<text x="675" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">nginx</text>
+<circle cx="758" cy="38" r="5" fill="#c4b5fd"/>
+<text x="771" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Traefik</text>
+<circle cx="854" cy="38" r="5" fill="#fda4af"/>
+<text x="867" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">HAProxy</text>
+<rect x="24" y="99" width="448" height="232" rx="12" fill="#1c2941"/>
+<text x="42" y="134" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTP proxy · keep-alive GET</text>
+<text x="42" y="171" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="120" y="158" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="158" width="157.87" height="15" rx="4" fill="#34d399"/>
+<text x="451" y="171" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">66,432</text>
+<text x="42" y="202" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="120" y="189" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="189" width="47.95" height="15" rx="4" fill="#7dd3fc"/>
+<text x="451" y="202" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">20,178</text>
+<text x="42" y="233" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="120" y="220" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="220" width="237.99" height="15" rx="4" fill="#fbbf24"/>
+<text x="451" y="233" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">100,148</text>
+<text x="42" y="264" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Traefik</text>
+<rect x="120" y="251" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="251" width="56.93" height="15" rx="4" fill="#c4b5fd"/>
+<text x="451" y="264" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">23,955</text>
+<text x="42" y="295" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">HAProxy</text>
+<rect x="120" y="282" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="282" width="251.00" height="15" rx="4" fill="#fda4af"/>
+<text x="451" y="295" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">105,624</text>
+<rect x="488" y="99" width="448" height="232" rx="12" fill="#1c2941"/>
+<text x="506" y="134" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS proxy · keep-alive GET</text>
+<text x="506" y="171" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="584" y="158" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="158" width="150.67" height="15" rx="4" fill="#34d399"/>
+<text x="915" y="171" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">41,125</text>
+<text x="506" y="202" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="584" y="189" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="189" width="67.16" height="15" rx="4" fill="#7dd3fc"/>
+<text x="915" y="202" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">18,331</text>
+<text x="506" y="233" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="584" y="220" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="220" width="246.37" height="15" rx="4" fill="#fbbf24"/>
+<text x="915" y="233" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">67,245</text>
+<text x="506" y="264" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Traefik</text>
+<rect x="584" y="251" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="251" width="80.88" height="15" rx="4" fill="#c4b5fd"/>
+<text x="915" y="264" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">22,075</text>
+<text x="506" y="295" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">HAProxy</text>
+<rect x="584" y="282" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="282" width="251.00" height="15" rx="4" fill="#fda4af"/>
+<text x="915" y="295" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">68,509</text>
+<rect x="24" y="351" width="448" height="232" rx="12" fill="#1c2941"/>
+<text x="42" y="386" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS proxy · new connections</text>
+<text x="42" y="423" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="120" y="410" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="410" width="251.00" height="15" rx="4" fill="#34d399"/>
+<text x="451" y="423" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">2,746</text>
+<text x="42" y="454" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="120" y="441" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="441" width="211.77" height="15" rx="4" fill="#7dd3fc"/>
+<text x="451" y="454" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">2,317</text>
+<text x="42" y="485" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="120" y="472" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="472" width="161.22" height="15" rx="4" fill="#fbbf24"/>
+<text x="451" y="485" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">1,764</text>
+<text x="42" y="516" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Traefik</text>
+<rect x="120" y="503" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="503" width="217.81" height="15" rx="4" fill="#c4b5fd"/>
+<text x="451" y="516" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">2,383</text>
+<text x="42" y="547" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">HAProxy</text>
+<rect x="120" y="534" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="534" width="211.37" height="15" rx="4" fill="#fda4af"/>
+<text x="451" y="547" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">2,312</text>
+<rect x="488" y="351" width="448" height="232" rx="12" fill="#1c2941"/>
+<text x="506" y="386" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS proxy · keep-alive POST</text>
+<text x="506" y="423" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="584" y="410" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="410" width="207.50" height="15" rx="4" fill="#34d399"/>
+<text x="915" y="423" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">33,079</text>
+<text x="506" y="454" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="584" y="441" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="441" width="97.75" height="15" rx="4" fill="#7dd3fc"/>
+<text x="915" y="454" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">15,584</text>
+<text x="506" y="485" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="584" y="472" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="472" width="239.94" height="15" rx="4" fill="#fbbf24"/>
+<text x="915" y="485" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">38,251</text>
+<text x="506" y="516" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Traefik</text>
+<rect x="584" y="503" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="503" width="126.55" height="15" rx="4" fill="#c4b5fd"/>
+<text x="915" y="516" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">20,174</text>
+<text x="506" y="547" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">HAProxy</text>
+<rect x="584" y="534" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="534" width="251.00" height="15" rx="4" fill="#fda4af"/>
+<text x="915" y="547" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">40,014</text>
+<text x="28" y="614" fill="#b0bfd8" font-size="13" font-weight="400" text-anchor="start">Independent scales by workload · see the benchmark notes for versions and methodology</text>
+</g>
+</svg>

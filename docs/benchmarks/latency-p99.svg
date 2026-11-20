@@ -1,72 +1,72 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520" role="img" aria-labelledby="title description">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 508" width="960" height="508" role="img" aria-labelledby="title description">
 <title id="title">Tail latency (p99)</title>
 <desc id="description">Median of run p99 values · milliseconds · lower is better Numeric results are also available in the benchmark table.</desc>
-<rect width="960" height="520" rx="20" fill="#0f172a"/>
+<rect width="960" height="508" rx="20" fill="#0f172a"/>
 <g font-family="system-ui, -apple-system, sans-serif">
 <text x="28" y="47" fill="#f8fafc" font-size="28" font-weight="700" text-anchor="start">Tail latency (p99)</text>
 <text x="28" y="75" fill="#b0bfd8" font-size="14" font-weight="400" text-anchor="start">Median of run p99 values · milliseconds · lower is better</text>
-<circle cx="650" cy="38" r="5" fill="#34d399"/>
-<text x="663" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Raddy</text>
-<circle cx="748" cy="38" r="5" fill="#7dd3fc"/>
-<text x="761" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Caddy</text>
-<circle cx="846" cy="38" r="5" fill="#fbbf24"/>
-<text x="859" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">nginx</text>
-<rect x="24" y="99" width="448" height="176" rx="12" fill="#1c2941"/>
+<circle cx="662" cy="38" r="5" fill="#34d399"/>
+<text x="675" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Raddy</text>
+<circle cx="758" cy="38" r="5" fill="#7dd3fc"/>
+<text x="771" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">Caddy</text>
+<circle cx="854" cy="38" r="5" fill="#fbbf24"/>
+<text x="867" y="43" fill="#dbe4f4" font-size="15" font-weight="400" text-anchor="start">nginx</text>
+<rect x="24" y="99" width="448" height="170" rx="12" fill="#1c2941"/>
 <text x="42" y="134" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTP static file</text>
-<text x="42" y="172" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
-<rect x="101" y="159" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="101" y="159" width="10.03" height="15" rx="4" fill="#34d399"/>
-<text x="451" y="172" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.15 ms</text>
-<text x="42" y="205" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
-<rect x="101" y="192" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="101" y="192" width="270.00" height="15" rx="4" fill="#7dd3fc"/>
-<text x="451" y="205" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">3.98 ms</text>
-<text x="42" y="238" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
-<rect x="101" y="225" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="101" y="225" width="20.40" height="15" rx="4" fill="#fbbf24"/>
-<text x="451" y="238" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.30 ms</text>
-<rect x="488" y="99" width="448" height="176" rx="12" fill="#1c2941"/>
+<text x="42" y="171" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="120" y="158" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="158" width="9.32" height="15" rx="4" fill="#34d399"/>
+<text x="451" y="171" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.15 ms</text>
+<text x="42" y="202" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="120" y="189" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="189" width="251.00" height="15" rx="4" fill="#7dd3fc"/>
+<text x="451" y="202" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">3.98 ms</text>
+<text x="42" y="233" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="120" y="220" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="220" width="18.96" height="15" rx="4" fill="#fbbf24"/>
+<text x="451" y="233" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.30 ms</text>
+<rect x="488" y="99" width="448" height="170" rx="12" fill="#1c2941"/>
 <text x="506" y="134" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS static · keep-alive</text>
-<text x="506" y="172" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
-<rect x="565" y="159" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="565" y="159" width="32.98" height="15" rx="4" fill="#34d399"/>
-<text x="915" y="172" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.56 ms</text>
-<text x="506" y="205" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
-<rect x="565" y="192" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="565" y="192" width="270.00" height="15" rx="4" fill="#7dd3fc"/>
-<text x="915" y="205" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">4.62 ms</text>
-<text x="506" y="238" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
-<rect x="565" y="225" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="565" y="225" width="27.71" height="15" rx="4" fill="#fbbf24"/>
-<text x="915" y="238" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.47 ms</text>
-<rect x="24" y="295" width="448" height="176" rx="12" fill="#1c2941"/>
-<text x="42" y="330" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS static · new connections</text>
-<text x="42" y="368" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
-<rect x="101" y="355" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="101" y="355" width="114.58" height="15" rx="4" fill="#34d399"/>
-<text x="451" y="368" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">5.26 ms</text>
-<text x="42" y="401" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
-<rect x="101" y="388" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="101" y="388" width="270.00" height="15" rx="4" fill="#7dd3fc"/>
-<text x="451" y="401" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">12.40 ms</text>
-<text x="42" y="434" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
-<rect x="101" y="421" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="101" y="421" width="126.51" height="15" rx="4" fill="#fbbf24"/>
-<text x="451" y="434" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">5.81 ms</text>
-<rect x="488" y="295" width="448" height="176" rx="12" fill="#1c2941"/>
-<text x="506" y="330" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS reverse proxy · POST</text>
-<text x="506" y="368" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
-<rect x="565" y="355" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="565" y="355" width="110.06" height="15" rx="4" fill="#34d399"/>
-<text x="915" y="368" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">2.54 ms</text>
-<text x="506" y="401" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
-<rect x="565" y="388" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="565" y="388" width="270.00" height="15" rx="4" fill="#7dd3fc"/>
-<text x="915" y="401" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">6.22 ms</text>
-<text x="506" y="434" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
-<rect x="565" y="421" width="270" height="15" rx="4" fill="#32405a"/>
-<rect x="565" y="421" width="135.24" height="15" rx="4" fill="#fbbf24"/>
-<text x="915" y="434" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">3.12 ms</text>
-<text x="28" y="502" fill="#b0bfd8" font-size="13" font-weight="400" text-anchor="start">Independent scales by workload · see the benchmark notes for versions and methodology</text>
+<text x="506" y="171" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="584" y="158" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="158" width="30.65" height="15" rx="4" fill="#34d399"/>
+<text x="915" y="171" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.56 ms</text>
+<text x="506" y="202" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="584" y="189" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="189" width="251.00" height="15" rx="4" fill="#7dd3fc"/>
+<text x="915" y="202" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">4.62 ms</text>
+<text x="506" y="233" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="584" y="220" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="220" width="25.76" height="15" rx="4" fill="#fbbf24"/>
+<text x="915" y="233" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">0.47 ms</text>
+<rect x="24" y="289" width="448" height="170" rx="12" fill="#1c2941"/>
+<text x="42" y="324" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS static · new connections</text>
+<text x="42" y="361" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="120" y="348" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="348" width="106.52" height="15" rx="4" fill="#34d399"/>
+<text x="451" y="361" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">5.26 ms</text>
+<text x="42" y="392" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="120" y="379" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="379" width="251.00" height="15" rx="4" fill="#7dd3fc"/>
+<text x="451" y="392" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">12.40 ms</text>
+<text x="42" y="423" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="120" y="410" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="120" y="410" width="117.61" height="15" rx="4" fill="#fbbf24"/>
+<text x="451" y="423" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">5.81 ms</text>
+<rect x="488" y="289" width="448" height="170" rx="12" fill="#1c2941"/>
+<text x="506" y="324" fill="#f8fafc" font-size="18" font-weight="650" text-anchor="start">HTTPS reverse proxy · POST</text>
+<text x="506" y="361" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Raddy</text>
+<rect x="584" y="348" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="348" width="102.31" height="15" rx="4" fill="#34d399"/>
+<text x="915" y="361" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">2.54 ms</text>
+<text x="506" y="392" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">Caddy</text>
+<rect x="584" y="379" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="379" width="251.00" height="15" rx="4" fill="#7dd3fc"/>
+<text x="915" y="392" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">6.22 ms</text>
+<text x="506" y="423" fill="#dbe4f4" font-size="13" font-weight="400" text-anchor="start">nginx</text>
+<rect x="584" y="410" width="251" height="15" rx="4" fill="#32405a"/>
+<rect x="584" y="410" width="125.72" height="15" rx="4" fill="#fbbf24"/>
+<text x="915" y="423" fill="#dbe4f4" font-size="14" font-weight="650" text-anchor="end">3.12 ms</text>
+<text x="28" y="490" fill="#b0bfd8" font-size="13" font-weight="400" text-anchor="start">Independent scales by workload · see the benchmark notes for versions and methodology</text>
 </g>
 </svg>

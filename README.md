@@ -28,7 +28,7 @@ Open `http://127.0.0.1:8080/`. You don't need a domain or a Cloudflare token for
 
 - [Enable HTTPS with Cloudflare DNS-01](docs/CONFIGURATION.md#cloudflare-dns-01)
 - [Set up HTTP routing, TLS passthrough, or PROXY protocol](docs/CONFIGURATION.md#routing-tls-passthrough-and-proxy-protocol)
-- Compare Raddy, Caddy, and nginx: [HTTP/HTTPS](docs/BENCHMARKS.md) · [TCP/TLS passthrough](docs/BENCHMARKS.layer4.md)
+- Compare Raddy, Caddy, nginx, Traefik, and HAProxy: [HTTP/HTTPS reverse proxy](docs/BENCHMARKS.proxy.md) · [TCP/TLS passthrough](docs/BENCHMARKS.layer4.md). See also [native static file benchmarks](docs/BENCHMARKS.md).
 
 Raddy is under active development. It reads a subset of Caddyfile syntax; it is [not a drop-in replacement for Caddy](docs/CONFIGURATION.md#compatibility).
 

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::Infallible,
     future::Future,
     net::SocketAddr,
@@ -37,7 +37,7 @@ use hyper_util::{
 use ring::digest::{Context as Digest, SHA1_FOR_LEGACY_USE_ONLY};
 use tokio::{
     net::{TcpListener, TcpStream},
-    time::timeout,
+    time::{Instant, timeout, timeout_at},
 };
 use tokio_rustls::TlsAcceptor;
 use tokio_util::io::ReaderStream;
@@ -132,6 +132,7 @@ impl HostRoutes {
 
 struct Site {
     config: SiteConfig,
+    proxy_response_headers: HeaderMap,
     static_files: Option<Arc<StaticFiles>>,
     proxy: Option<Arc<ProxyHandler>>,
     responses: Vec<Respond>,
@@ -674,14 +675,29 @@ impl<'a> RouteCursor<'a> {
     }
 }
 
+struct Peer {
+    address: SocketAddr,
+    forwarded_for: HeaderValue,
+}
+
+impl Peer {
+    fn new(address: SocketAddr) -> Result<Self, header::InvalidHeaderValue> {
+        Ok(Self {
+            address,
+            forwarded_for: HeaderValue::try_from(address.ip().to_string())?,
+        })
+    }
+}
+
 struct RouteRequest<'a> {
     request: &'a mut Request<Option<Incoming>>,
     site: &'a Site,
-    peer: Option<SocketAddr>,
+    peer: Option<&'a Peer>,
     secure: bool,
     connections: &'a crate::runtime::Connections,
     captures: RouteCaptures,
     immediate_headers: HeaderMap,
+    immediate_replacements: HashSet<HeaderName>,
 }
 
 struct RouteError {
@@ -1024,8 +1040,9 @@ fn strip_route_prefix(uri: &mut Uri, prefix: &str) -> Result<()> {
 }
 
 struct Upstream {
-    scheme: String,
-    authority: String,
+    scheme: http::uri::Scheme,
+    authority: http::uri::Authority,
+    host_header: HeaderValue,
     h2c: bool,
     healthy: AtomicBool,
 }
@@ -1034,16 +1051,28 @@ impl Upstream {
     fn new(url: &str) -> Result<Self> {
         let url = url::Url::parse(url)?;
         let h2c = url.scheme() == "h2c";
+        let authority = &url[url::Position::BeforeHost..url::Position::AfterPort];
         Ok(Self {
-            scheme: if h2c { "http" } else { url.scheme() }.to_owned(),
-            authority: url[url::Position::BeforeHost..url::Position::AfterPort].to_owned(),
+            scheme: if h2c { "http" } else { url.scheme() }.parse()?,
+            authority: authority.parse()?,
+            host_header: HeaderValue::from_str(authority)?,
             h2c,
             healthy: AtomicBool::new(true),
         })
     }
 
-    fn uri(&self, path: &str) -> Result<Uri, http::uri::InvalidUri> {
-        format!("{}://{}{path}", self.scheme, self.authority).parse()
+    fn apply_host(&self, headers: &mut HeaderMap) {
+        if self.scheme == http::uri::Scheme::HTTPS || !headers.contains_key(HOST) {
+            headers.insert(HOST, self.host_header.clone());
+        }
+    }
+
+    fn uri(&self, path: http::uri::PathAndQuery) -> Result<Uri, http::Error> {
+        Uri::builder()
+            .scheme(self.scheme.clone())
+            .authority(self.authority.clone())
+            .path_and_query(path)
+            .build()
     }
 }
 
@@ -1144,7 +1173,7 @@ impl ResponseHeaders {
                 || condition.is_some()
                 || operations
                     .iter()
-                    .any(|op| op.name.starts_with(['-', '>', '?'])),
+                    .any(|op| op.replacement.is_some() || op.name.starts_with(['-', '>', '?'])),
             statuses: Vec::new(),
             conditions: Vec::new(),
         };
@@ -1181,6 +1210,15 @@ impl ResponseHeaders {
     }
 
     fn apply(&self, headers: &mut HeaderMap, expand: impl Fn(&str) -> String) {
+        self.apply_with_replacements(headers, None, expand);
+    }
+
+    fn apply_with_replacements(
+        &self,
+        headers: &mut HeaderMap,
+        mut replacements: Option<&mut HashSet<HeaderName>>,
+        expand: impl Fn(&str) -> String,
+    ) {
         if self
             .operations
             .iter()
@@ -1204,6 +1242,9 @@ impl ResponseHeaders {
         }
         for (name, values) in set {
             if let Ok(value) = HeaderValue::from_bytes(values.join(",").as_bytes()) {
+                if let Some(replacements) = &mut replacements {
+                    replacements.insert(name.clone());
+                }
                 headers.insert(name, value);
             }
         }
@@ -1367,6 +1408,12 @@ impl Respond {
 }
 
 impl Site {
+    fn apply_proxy_response_headers(&self, headers: &mut HeaderMap) {
+        for (name, value) in &self.proxy_response_headers {
+            headers.insert(name, value.clone());
+        }
+    }
+
     fn respond(&self, path: &str) -> Option<&Respond> {
         let first = self.responses.first()?;
         if first.path.is_none() {
@@ -1443,7 +1490,10 @@ impl Server {
                         }))
                     });
                     crate::routes::validate_routes(&site.routes, 0)?;
+                    let mut proxy_response_headers = HeaderMap::new();
+                    add_configured_headers(&mut proxy_response_headers, site);
                     Ok(Site {
+                        proxy_response_headers,
                         routes: Route::compile(&site.routes, site, &config)?,
                         error_routes: site
                             .error_routes
@@ -1499,6 +1549,7 @@ impl Server {
             .enable_http2()
             .wrap_connector(connector);
         let client = Client::builder(TokioExecutor::new())
+            .pool_timer(TokioTimer::new())
             .pool_idle_timeout(Duration::from_secs(90))
             .pool_max_idle_per_host(128)
             .build(connector);
@@ -1530,9 +1581,9 @@ impl Server {
             };
             let mut builder = Client::builder(TokioExecutor::new());
             builder.pool_max_idle_per_host(0);
-            if upstream.h2c {
+            if upstream.scheme == http::uri::Scheme::HTTP {
                 return Ok(builder
-                    .http2_only(true)
+                    .http2_only(upstream.h2c)
                     .build(connector)
                     .request(request)
                     .await?);
@@ -1586,6 +1637,9 @@ impl Server {
             let interval = Duration::from_secs(proxy.settings.health_interval_secs.unwrap_or(30));
             let deadline = Duration::from_secs(proxy.settings.health_timeout_secs.unwrap_or(5));
             for (j, upstream) in proxy.upstreams.iter().enumerate() {
+                let Ok(path) = path.parse() else {
+                    continue;
+                };
                 let Ok(uri) = upstream.uri(path) else {
                     continue;
                 };
@@ -1622,8 +1676,8 @@ impl Server {
 
     pub async fn run(self, cloudflare: Option<Arc<crate::cloudflare::Cloudflare>>) -> Result<()> {
         let server = Arc::new(self);
-        let tls = server.tls_acceptor(cloudflare).await?;
         let stop = tokio_util::sync::CancellationToken::new();
+        let tls = server.tls_acceptor(cloudflare, &stop).await?;
         server.spawn_health_checks(&stop);
         let _stop = stop.drop_guard();
         let http_listener = TcpListener::bind(server.config.http_addr)
@@ -1658,13 +1712,14 @@ impl Server {
     pub(crate) async fn tls_acceptor(
         &self,
         cloudflare: Option<Arc<crate::cloudflare::Cloudflare>>,
+        stop: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<TlsAcceptor>> {
         if !self.sites.iter().any(|site| site.config.tls) {
             return Ok(None);
         }
         let store = CertificateStore::new(self.config.clone(), cloudflare);
         store.provision().await?;
-        store.spawn_renewals();
+        store.spawn_renewals(stop.clone());
         let mut tls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(store.resolver());
@@ -1720,7 +1775,7 @@ impl Server {
     async fn handle(
         &self,
         request: Request<Option<Incoming>>,
-        peer: Option<SocketAddr>,
+        peer: Option<&Peer>,
         secure: bool,
         connections: &crate::runtime::Connections,
     ) -> Result<Response<Body>, Infallible> {
@@ -1760,7 +1815,7 @@ impl Server {
         } else if let Some(files) = &site.static_files {
             Self::static_response(request, files).await
         } else {
-            text_response(StatusCode::NOT_FOUND, "not found\n")
+            route_empty_response()
         })
     }
 
@@ -1768,7 +1823,7 @@ impl Server {
         &self,
         mut request: Request<Option<Incoming>>,
         site: &Site,
-        peer: Option<SocketAddr>,
+        peer: Option<&Peer>,
         secure: bool,
         connections: &crate::runtime::Connections,
     ) -> Response<Body> {
@@ -1780,6 +1835,7 @@ impl Server {
             connections,
             captures: RouteCaptures::default(),
             immediate_headers: HeaderMap::new(),
+            immediate_replacements: HashSet::new(),
         };
         let original_uri = (!site.error_routes.is_empty()).then(|| context.request.uri().clone());
         let result = self.run_routes(&site.routes, &mut context, None).await;
@@ -1846,7 +1902,7 @@ impl Server {
                         expression_value(
                             name,
                             request,
-                            context.peer,
+                            context.peer.map(|peer| peer.address),
                             context.secure,
                             error,
                             &context.captures,
@@ -1891,10 +1947,19 @@ impl Server {
                     if headers.defer {
                         response_headers.push(headers);
                     } else {
-                        headers.apply(&mut context.immediate_headers, |template| {
-                            expand_values(template, request.uri(), error, Some(&context.captures))
+                        headers.apply_with_replacements(
+                            &mut context.immediate_headers,
+                            Some(&mut context.immediate_replacements),
+                            |template| {
+                                expand_values(
+                                    template,
+                                    request.uri(),
+                                    error,
+                                    Some(&context.captures),
+                                )
                                 .into_owned()
-                        });
+                            },
+                        );
                     }
                 }
                 Action::Rewrite(to) => {
@@ -1998,10 +2063,11 @@ impl Server {
             }
         };
         for name in context.immediate_headers.keys() {
-            if !response.headers().contains_key(name) {
-                for value in context.immediate_headers.get_all(name) {
-                    response.headers_mut().append(name, value.clone());
-                }
+            if context.immediate_replacements.contains(name) {
+                response.headers_mut().remove(name);
+            }
+            for value in context.immediate_headers.get_all(name) {
+                response.headers_mut().append(name, value.clone());
             }
         }
         for headers in response_headers.into_iter().rev() {
@@ -2021,7 +2087,7 @@ impl Server {
         mut request: Request<Option<Incoming>>,
         site: &Site,
         proxy: &ProxyHandler,
-        peer: Option<SocketAddr>,
+        peer: Option<&Peer>,
         secure: bool,
         connections: &crate::runtime::Connections,
     ) -> Response<Body> {
@@ -2035,28 +2101,26 @@ impl Server {
         request: &mut Request<Option<Incoming>>,
         site: &Site,
         proxy: &ProxyHandler,
-        peer: Option<SocketAddr>,
+        peer: Option<&Peer>,
         secure: bool,
         connections: &crate::runtime::Connections,
     ) -> Result<Response<Body>, RouteError> {
-        match timeout(
-            self.config.request_timeout(),
-            self.proxy(request, site, proxy, peer, secure, connections),
-        )
-        .await
+        match self
+            .proxy(request, site, proxy, peer, secure, connections)
+            .await
         {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(error)) => {
+            Ok(response) => Ok(response),
+            Err(error) if error.is::<UpstreamTimeout>() => Err(RouteError::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream request timed out\n",
+            )),
+            Err(error) => {
                 warn!(%error, "upstream request failed");
                 Err(RouteError::new(
                     StatusCode::BAD_GATEWAY,
                     "upstream request failed\n",
                 ))
             }
-            Err(_) => Err(RouteError::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream request timed out\n",
-            )),
         }
     }
 
@@ -2065,7 +2129,7 @@ impl Server {
         request: &mut Request<Option<Incoming>>,
         site: &Site,
         proxy: &ProxyHandler,
-        peer: Option<SocketAddr>,
+        peer: Option<&Peer>,
         secure: bool,
         connections: &crate::runtime::Connections,
     ) -> std::result::Result<Response<Body>, BoxError> {
@@ -2081,10 +2145,10 @@ impl Server {
             None
         };
         let start = match proxy.settings.lb_policy {
-            ProxyPolicy::RoundRobin => {
+            ProxyPolicy::RoundRobin if proxy.upstreams.len() > 1 => {
                 proxy.next_upstream.fetch_add(1, Ordering::Relaxed) % proxy.upstreams.len()
             }
-            ProxyPolicy::First => 0,
+            _ => 0,
         };
         let replayable = websocket.is_none()
             && matches!(*request.method(), Method::GET | Method::HEAD)
@@ -2096,29 +2160,27 @@ impl Server {
         parts.method = request.method().clone();
         parts.uri = request.uri().clone();
         parts.version = request.version();
-        parts.headers = request.headers().clone();
+        parts.headers = if site.error_routes.is_empty() {
+            std::mem::take(request.headers_mut())
+        } else {
+            request.headers().clone()
+        };
+        let start_time = Instant::now();
+        let mut progress = None;
         let mut body = request
             .body_mut()
             .take()
-            .map(|body| body.map_err(BoxError::from).boxed());
-        let host = parts
-            .uri
-            .authority()
-            .map(|authority| HeaderValue::from_str(authority.as_str()))
-            .transpose()?
-            .or_else(|| parts.headers.get(HOST).cloned());
-        let trailers = header_has_token(&parts.headers, header::TE, "trailers")
-            && !header_has_token(&parts.headers, CONNECTION, "te");
-        strip_hop_by_hop_headers(&mut parts.headers);
-        if let Some(host) = host {
-            parts.headers.entry(HOST).or_insert_with(|| host.clone());
-            parts.headers.insert("x-forwarded-host", host);
-        } else {
-            parts.headers.remove("x-forwarded-host");
-        }
-        if peer.is_none() {
-            parts.headers.remove("x-forwarded-for");
-        }
+            .filter(|body| !body.is_end_stream())
+            .map(|body| {
+                let (sender, receiver) = tokio::sync::watch::channel(start_time);
+                progress = Some(receiver);
+                UploadBody {
+                    body,
+                    progress: sender,
+                }
+                .boxed()
+            });
+        let trailers = prepare_proxy_headers(&mut parts.headers, &parts.uri, peer, secure)?;
         let mut parts = Some(parts);
         let mut retries = if replayable {
             proxy.settings.lb_retries
@@ -2148,7 +2210,8 @@ impl Server {
                 attempt
                     .uri
                     .path_and_query()
-                    .map_or("/", |path| path.as_str()),
+                    .cloned()
+                    .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/")),
             )?;
             if upstream.h2c {
                 attempt.version = http::Version::HTTP_2;
@@ -2157,34 +2220,34 @@ impl Server {
                         .headers
                         .insert(header::TE, HeaderValue::from_static("trailers"));
                 }
-            } else if upstream.scheme == "http" {
+            } else {
                 attempt.version = http::Version::HTTP_11;
             }
-            if upstream.scheme == "https" {
-                attempt
-                    .headers
-                    .insert(HOST, HeaderValue::from_str(&upstream.authority)?);
-            }
-            apply_forwarded_headers(&mut attempt.headers, &upstream.authority, peer, secure)?;
+            upstream.apply_host(&mut attempt.headers);
             HeaderOperation::apply_all(&proxy.header_up, &mut attempt.headers);
             if websocket.is_some() {
                 set_websocket_upgrade(&mut attempt.headers);
             }
             let request = Request::from_parts(attempt, body.take().unwrap_or_else(empty_body));
-            let result = self
-                .request_upstream(
+            let result = response_deadline(
+                self.request_upstream(
                     upstream,
                     websocket.is_some(),
                     proxy.settings.proxy_protocol,
                     connections.addresses,
                     request,
-                )
-                .await;
+                ),
+                self.config.request_timeout(),
+                start_time,
+                progress.as_ref(),
+            )
+            .await;
             match result {
                 Ok(winner) => {
                     response = Some(winner);
                     break;
                 }
+                Err(error) if error.is::<UpstreamTimeout>() => return Err(error),
                 Err(error) => {
                     last_error = Some(error);
                     if retries == 0 {
@@ -2221,7 +2284,7 @@ impl Server {
             let upstream = hyper::upgrade::on(&mut response).await?;
             let (mut parts, _) = response.into_parts();
             strip_hop_by_hop_headers(&mut parts.headers);
-            add_configured_headers(&mut parts.headers, &site.config);
+            site.apply_proxy_response_headers(&mut parts.headers);
             HeaderOperation::apply_all(&proxy.header_down, &mut parts.headers);
             strip_hop_by_hop_headers(&mut parts.headers);
             set_websocket_upgrade(&mut parts.headers);
@@ -2229,6 +2292,7 @@ impl Server {
             parts
                 .headers
                 .insert(SEC_WEBSOCKET_ACCEPT, HeaderValue::from_str(&accept)?);
+            let peer = peer.map(|peer| peer.address);
             let force = connections.force.clone();
             let admission = connections.admission.clone();
             connections.tasks.spawn(async move {
@@ -2262,7 +2326,7 @@ impl Server {
         }
         let (mut parts, body) = response.into_parts();
         strip_hop_by_hop_headers(&mut parts.headers);
-        add_configured_headers(&mut parts.headers, &site.config);
+        site.apply_proxy_response_headers(&mut parts.headers);
         HeaderOperation::apply_all(&proxy.header_down, &mut parts.headers);
         Ok(Response::from_parts(
             parts,
@@ -2427,12 +2491,13 @@ where
     let io = TokioIo::new(io);
     let max_header_size = server.config.max_header_size;
     let drain = connections.drain.clone();
+    let session = Arc::new((server, connections, Peer::new(peer)?));
     let service = service_fn(move |request: Request<Incoming>| {
-        let server = server.clone();
-        let connections = connections.clone();
+        let session = session.clone();
         async move {
-            server
-                .handle(request.map(Some), Some(peer), secure, &connections)
+            session
+                .0
+                .handle(request.map(Some), Some(&session.2), secure, &session.1)
                 .await
         }
     });
@@ -2505,6 +2570,74 @@ fn websocket_accept(key: &str) -> String {
 fn set_websocket_upgrade(headers: &mut HeaderMap) {
     headers.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
     headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("timed out waiting for upstream response or upload progress")]
+struct UpstreamTimeout;
+
+struct UploadBody {
+    body: Incoming,
+    progress: tokio::sync::watch::Sender<Instant>,
+}
+
+impl hyper::body::Body for UploadBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        context: &mut TaskContext<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, BoxError>>> {
+        match Pin::new(&mut self.body).poll_frame(context) {
+            Poll::Ready(Some(Ok(frame))) => {
+                if frame.data_ref().is_none_or(|data| !data.is_empty()) || self.body.is_end_stream()
+                {
+                    self.progress.send_replace(Instant::now());
+                }
+                Poll::Ready(Some(Ok(frame)))
+            }
+            Poll::Ready(None) => {
+                self.progress.send_replace(Instant::now());
+                Poll::Ready(None)
+            }
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.into()))),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
+    }
+}
+
+async fn response_deadline<T>(
+    future: impl Future<Output = Result<T, BoxError>>,
+    idle: Duration,
+    started: Instant,
+    progress: Option<&tokio::sync::watch::Receiver<Instant>>,
+) -> Result<T, BoxError> {
+    let mut future = std::pin::pin!(future);
+    let mut last = started;
+    loop {
+        let Some(deadline) = last.checked_add(idle) else {
+            return future.await;
+        };
+        match timeout_at(deadline, future.as_mut()).await {
+            Ok(result) => return result,
+            Err(_) => {
+                let updated = progress.map(|receiver| *receiver.borrow());
+                match updated {
+                    Some(updated) if updated > last && updated.elapsed() < idle => last = updated,
+                    _ => return Err(UpstreamTimeout.into()),
+                }
+            }
+        }
+    }
 }
 
 fn upstream_body(body: Incoming, idle: Duration) -> Body {
@@ -2614,56 +2747,78 @@ fn request_host_parts<B>(request: &Request<B>) -> Option<String> {
     )
 }
 
-fn apply_forwarded_headers(
+const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
+
+fn prepare_proxy_headers(
     headers: &mut HeaderMap,
-    authority: &str,
-    peer: Option<SocketAddr>,
+    uri: &Uri,
+    peer: Option<&Peer>,
     secure: bool,
-) -> std::result::Result<(), BoxError> {
-    if !headers.contains_key(HOST) {
-        headers.insert(HOST, HeaderValue::from_str(authority)?);
+) -> Result<bool, header::InvalidHeaderValue> {
+    let host = uri
+        .authority()
+        .map(|authority| HeaderValue::from_str(authority.as_str()))
+        .transpose()?
+        .or_else(|| headers.get(HOST).cloned());
+    let trailers = header_has_token(headers, header::TE, "trailers");
+    let te_nominated = strip_hop_by_hop_headers(headers);
+    if let Some(host) = host {
+        headers.entry(HOST).or_insert_with(|| host.clone());
+        headers.insert(X_FORWARDED_HOST, host);
+    } else {
+        headers.remove(X_FORWARDED_HOST);
     }
     headers.insert(
-        "x-forwarded-proto",
+        X_FORWARDED_PROTO,
         HeaderValue::from_static(if secure { "https" } else { "http" }),
     );
     if let Some(peer) = peer {
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_str(&peer.ip().to_string())?,
-        );
+        headers.insert(X_FORWARDED_FOR, peer.forwarded_for.clone());
+    } else {
+        headers.remove(X_FORWARDED_FOR);
     }
-    Ok(())
+    Ok(trailers && !te_nominated)
 }
 
-fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let connection_headers = headers
+fn strip_hop_by_hop_headers(headers: &mut HeaderMap) -> bool {
+    let extra = headers
         .get_all(CONNECTION)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| {
-            value
-                .split(',')
-                .map(|name| name.trim().to_owned())
-                .collect::<Vec<_>>()
-        })
-        .filter_map(|name| HeaderName::from_bytes(name.as_bytes()).ok())
+        .skip(1)
+        .cloned()
         .collect::<Vec<_>>();
-    for name in connection_headers {
+    let first = headers.remove(CONNECTION);
+    let mut te_nominated = false;
+    for value in first.into_iter().chain(extra) {
+        if let Ok(value) = value.to_str() {
+            for name in value.split(',').map(str::trim) {
+                if name.eq_ignore_ascii_case("te") {
+                    te_nominated = true;
+                } else if name.eq_ignore_ascii_case("keep-alive") {
+                    continue;
+                } else if name.eq_ignore_ascii_case("close") {
+                    headers.remove(HeaderName::from_static("close"));
+                } else if let Ok(name) = HeaderName::from_bytes(name.as_bytes()) {
+                    headers.remove(name);
+                }
+            }
+        }
+    }
+    static HOP_HEADERS: [HeaderName; 7] = [
+        HeaderName::from_static("keep-alive"),
+        header::PROXY_AUTHENTICATE,
+        header::PROXY_AUTHORIZATION,
+        header::TE,
+        header::TRAILER,
+        header::TRANSFER_ENCODING,
+        UPGRADE,
+    ];
+    for name in &HOP_HEADERS {
         headers.remove(name);
     }
-    for name in [
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    ] {
-        headers.remove(name);
-    }
+    te_nominated
 }
 
 fn add_configured_headers(headers: &mut HeaderMap, config: &SiteConfig) {
@@ -2784,6 +2939,93 @@ mod tests {
         client_task.await.unwrap().unwrap();
         relay_task.await.unwrap().unwrap();
         upstream_task.abort();
+    }
+
+    #[tokio::test]
+    async fn http2_client_can_reach_http1_only_https_upstream() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = crate::caddyfile::parse(&format!(
+            "http://relay.test {{ reverse_proxy https://localhost:{} }}",
+            upstream.local_addr().unwrap().port(),
+        ))
+        .unwrap();
+        let pem = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(pem.cert.der().clone()).unwrap();
+        let client_tls = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut upstream_tls = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![pem.cert.der().clone()],
+                rustls::pki_types::PrivatePkcs8KeyDer::from(pem.signing_key.serialize_der()).into(),
+            )
+            .unwrap();
+        upstream_tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut server = Server::new(config).unwrap();
+        server.client = Client::builder(TokioExecutor::new()).build(
+            hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config(client_tls)
+                .https_only()
+                .enable_http1()
+                .enable_http2()
+                .build(),
+        );
+        let (relay, client) = tokio::io::duplex(8192);
+        let relay = tokio::spawn(serve_connection(
+            relay,
+            Arc::new(server),
+            upstream.local_addr().unwrap(),
+            false,
+        ));
+        let backend = tokio::spawn(async move {
+            let (socket, _) = upstream.accept().await.unwrap();
+            let io = TlsAcceptor::from(Arc::new(upstream_tls))
+                .accept(socket)
+                .await
+                .unwrap();
+            assert_eq!(io.get_ref().1.alpn_protocol(), Some(b"http/1.1".as_slice()));
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(
+                    TokioIo::new(io),
+                    service_fn(|request: Request<Incoming>| async move {
+                        assert_eq!(request.version(), http::Version::HTTP_11);
+                        assert_eq!(request.uri().path(), "/h2-to-h1");
+                        Ok::<_, Infallible>(Response::new(Full::new(Bytes::from_static(
+                            b"upstream",
+                        ))))
+                    }),
+                )
+                .await
+                .unwrap();
+        });
+        timeout(Duration::from_secs(5), async {
+            let (mut tx, conn) =
+                hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(client))
+                    .await
+                    .unwrap();
+            let connection = tokio::spawn(conn);
+            let response = tx
+                .send_request(
+                    Request::get("http://relay.test/h2-to-h1")
+                        .body(Empty::<Bytes>::new())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.into_body().collect().await.unwrap().to_bytes(),
+                "upstream"
+            );
+            connection.abort();
+        })
+        .await
+        .unwrap();
+        relay.abort();
+        backend.abort();
     }
 
     #[tokio::test]
@@ -3037,12 +3279,21 @@ mod tests {
     fn proxy_keeps_the_original_host_header() {
         let mut headers = HeaderMap::new();
         headers.insert(HOST, HeaderValue::from_static("www.example.com"));
-        apply_forwarded_headers(&mut headers, "127.0.0.1:9000", None, false).unwrap();
+        let http = Upstream::new("http://127.0.0.1:9000").unwrap();
+        let uri = Uri::from_static("/");
+        prepare_proxy_headers(&mut headers, &uri, None, false).unwrap();
+        http.apply_host(&mut headers);
         assert_eq!(headers[HOST], "www.example.com");
+        assert_eq!(headers[X_FORWARDED_HOST], "www.example.com");
         assert_eq!(headers["x-forwarded-proto"], "http");
 
         let mut headers = HeaderMap::new();
-        apply_forwarded_headers(&mut headers, "127.0.0.1:9000", None, true).unwrap();
+        headers.insert(X_FORWARDED_HOST, HeaderValue::from_static("untrusted"));
+        headers.insert(X_FORWARDED_FOR, HeaderValue::from_static("203.0.113.7"));
+        prepare_proxy_headers(&mut headers, &uri, None, true).unwrap();
+        http.apply_host(&mut headers);
+        assert!(!headers.contains_key(X_FORWARDED_HOST));
+        assert!(!headers.contains_key(X_FORWARDED_FOR));
         assert_eq!(headers[HOST], "127.0.0.1:9000");
         assert_eq!(headers["x-forwarded-proto"], "https");
     }
@@ -3051,9 +3302,83 @@ mod tests {
     fn proxy_replaces_untrusted_x_forwarded_for() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.7"));
-        let peer: SocketAddr = "198.51.100.4:1234".parse().unwrap();
-        apply_forwarded_headers(&mut headers, "127.0.0.1:9000", Some(peer), false).unwrap();
-        assert_eq!(headers["x-forwarded-for"], "198.51.100.4");
+        headers.append(X_FORWARDED_FOR, HeaderValue::from_static("other"));
+        let peer = Peer::new("198.51.100.4:1234".parse().unwrap()).unwrap();
+        prepare_proxy_headers(&mut headers, &Uri::from_static("/"), Some(&peer), false).unwrap();
+        assert_eq!(
+            single_header(&headers, X_FORWARDED_FOR),
+            Some("198.51.100.4")
+        );
+    }
+
+    #[test]
+    fn proxy_prepares_headers_before_applying_per_upstream_host() {
+        let uri = Uri::from_static("http://public.example:8080/test");
+        let peer = Peer::new("[2001:db8::1]:4321".parse().unwrap()).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("client.example"));
+        headers.insert(CONNECTION, HeaderValue::from_static("x-drop, Close"));
+        headers.append(CONNECTION, HeaderValue::from_static("Connection, tE"));
+        headers.append(
+            CONNECTION,
+            HeaderValue::from_bytes(b"\xff, x-keep").unwrap(),
+        );
+        headers.insert(header::TE, HeaderValue::from_static("Trailers"));
+        for name in ["close", "x-drop", "x-keep"] {
+            headers.insert(name, HeaderValue::from_static("1"));
+        }
+        assert!(!prepare_proxy_headers(&mut headers, &uri, Some(&peer), false).unwrap());
+        assert!(!headers.contains_key(CONNECTION));
+        assert!(!headers.contains_key(header::TE));
+        assert!(!headers.contains_key("x-drop"));
+        assert!(!headers.contains_key("close"));
+        assert_eq!(headers["x-keep"], "1");
+        assert_eq!(headers[X_FORWARDED_FOR], "2001:db8::1");
+        assert_eq!(headers[X_FORWARDED_HOST], "public.example:8080");
+        let http = Upstream::new("http://origin.example").unwrap();
+        http.apply_host(&mut headers);
+        assert_eq!(headers[HOST], "client.example");
+        Upstream::new("https://other.example:8443")
+            .unwrap()
+            .apply_host(&mut headers);
+        assert_eq!(headers[HOST], "other.example:8443");
+        assert_eq!(headers[X_FORWARDED_HOST], "public.example:8080");
+
+        headers.insert(
+            CONNECTION,
+            HeaderValue::from_static("HOST, x-forwarded-proto"),
+        );
+        headers.insert(header::TE, HeaderValue::from_static("deflate, Trailers"));
+        assert!(prepare_proxy_headers(&mut headers, &uri, None, true).unwrap());
+        assert_eq!(headers[HOST], "public.example:8080");
+        assert_eq!(headers[X_FORWARDED_PROTO], "https");
+        assert!(!headers.contains_key(header::TE));
+    }
+
+    #[test]
+    fn proxy_cached_response_headers_preserve_replacement_order() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut config = site("*");
+        config
+            .response_headers
+            .insert("X-Site".into(), "first".into());
+        config
+            .response_headers
+            .insert("x-site".into(), "last".into());
+        let server = Server::new(Config {
+            sites: vec![config],
+            ..Config::default()
+        })
+        .unwrap();
+        let site = &server.sites[0];
+        let mut headers = HeaderMap::new();
+        headers.append("x-site", HeaderValue::from_static("one"));
+        headers.append("x-site", HeaderValue::from_static("two"));
+        let mut expected = headers.clone();
+        add_configured_headers(&mut expected, &site.config);
+        site.apply_proxy_response_headers(&mut headers);
+        assert_eq!(headers, expected);
+        assert_eq!(headers["x-site"], "last");
     }
 
     #[test]

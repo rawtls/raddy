@@ -135,10 +135,15 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Validate => {
             raddy::acme::validate_configured_certificates(&config).await?;
+            let sites = config.sites.len();
+            let streams = config.streams.len();
+            if sites != 0 {
+                tokio::task::spawn_blocking(move || raddy::server::Server::new(config)).await??;
+            }
             println!(
                 "configuration is valid: {} site(s), {} stream(s): {}",
-                config.sites.len(),
-                config.streams.len(),
+                sites,
+                streams,
                 config_path.display()
             );
             Ok(())
