@@ -55,7 +55,7 @@ cargo run --release -- --config Raddyfile run
 
 ## Docker
 
-Соберите образ из исходников. Когда появится релиз, архив образа для `linux/amd64` или `linux/arm64` можно будет скачать из раздела Releases и загрузить через `docker load`. Видимость пакета GHCR настраивается отдельно от репозитория.
+Соберите образ из исходников или скачайте архив для `linux/amd64` либо `linux/arm64` из раздела Releases и загрузите его через `docker load`. Видимость пакета GHCR настраивается отдельно от репозитория.
 
 ```sh
 docker build -t raddy:local .
@@ -66,6 +66,50 @@ docker run --rm --name raddy -p 80:80 -p 443:443 \
 ```
 
 Перед запуском адаптируйте `Raddyfile`: адреса upstream должны быть доступны из контейнера, а для статики нужно смонтировать каталог. Для дополнительных TCP listener публикуйте соответствующие порты отдельными `-p`. Сертификаты и ACME-аккаунт храните в `/data`; монтируемые конфиг и сертификаты должны быть доступны для чтения UID `10001`. `CF_API_TOKEN` нужен только при использовании Cloudflare и передаётся из окружения хоста. Для локальной сборки: `docker build -t raddy:local .`.
+
+### Docker Compose (Linux, сеть хоста)
+
+Сохраните `compose.yaml` рядом с вашим `Raddyfile`:
+
+```yaml
+services:
+  raddy:
+    image: ghcr.io/rawtls/raddy:v0.3.0
+    container_name: raddy
+    restart: unless-stopped
+    stop_grace_period: 35s
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - CF_API_TOKEN
+    volumes:
+      - ./Raddyfile:/etc/raddy/Raddyfile:ro
+      - raddy-data:/data
+
+volumes:
+  raddy-data:
+```
+
+Подготовьте свой `Raddyfile` и запустите:
+
+```sh
+docker compose run --rm raddy validate
+docker compose up -d
+```
+
+В режиме `host` секция `ports:` не нужна: Raddy слушает порты прямо на хосте. Проверьте, что они свободны, и ограничьте доступ к внутренним портам через `bind` или файрвол. Если Xray работает на том же Linux-хосте, upstream `127.0.0.1:10001` будет указывать на него, а не на отдельную сеть контейнера.
+
+Для Cloudflare DNS-01 положите `.env` рядом с `compose.yaml` и запускайте Compose из этого каталога:
+
+```dotenv
+CF_API_TOKEN=ваш_токен_Cloudflare
+```
+
+Не коммитьте `.env`. Если переменная уже экспортирована в оболочке, её значение имеет приоритет. В `Raddyfile` укажите `api_token {env.CF_API_TOKEN}` в блоке `cloudflare` и храните данные под `/data` (например, `data_dir /data/raddy-data`). Без Cloudflare токен не нужен. Если образ из GHCR недоступен, в клоне репозитория замените `image:` на `build: .` и выполните `docker compose build`.
 
 Минимальная конфигурация для HTTP без Cloudflare:
 

@@ -26,7 +26,7 @@ cargo build --locked --release
 
 In another terminal, run `curl -fsS http://127.0.0.1:8080/`. The response body is `OK`.
 
-Build the container locally with `docker build -t raddy:local .`. The Docker entrypoint loads `/etc/raddy/Raddyfile`; mount the configuration there and persist `/data`. When a release is published, Linux amd64 and arm64 container archives will be available in the Releases section. GHCR package visibility is managed separately.
+Build the container locally with `docker build -t raddy:local .`. The Docker entrypoint loads `/etc/raddy/Raddyfile`; mount the configuration there and persist `/data`. Linux amd64 and arm64 container archives are available in the Releases section. GHCR package visibility is managed separately. See the [Docker Compose example](README.md#docker-compose-linux-сеть-хоста) for deployment on Linux with host networking.
 
 ## Deploy responsibly
 
