@@ -1,0 +1,122 @@
+# Configuring Raddy
+
+[Русский](CONFIGURATION.ru.md) · [Home](../README.md) · [Sample Raddyfile](../Raddyfile) · [Sample JSON](../raddy.example.json)
+
+## Configuration file
+
+Without `--config`, Raddy looks for `raddy.json`, `Raddyfile`, and `Caddyfile` in that order. A `.json` file uses JSON; other files use Caddyfile syntax. To run from source (Rust 1.94 or newer):
+
+```sh
+cargo build --locked --release
+./target/release/raddy --config Raddyfile validate
+./target/release/raddy --config Raddyfile run
+```
+
+## Docker Compose (Linux host networking)
+
+Save `compose.yaml` next to your `Raddyfile`:
+
+```yaml
+services:
+  raddy:
+    image: ghcr.io/rawtls/raddy:v0.3.0
+    container_name: raddy
+    restart: unless-stopped
+    stop_grace_period: 35s
+    network_mode: host
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      - CF_API_TOKEN
+    volumes:
+      - ./Raddyfile:/etc/raddy/Raddyfile:ro
+      - raddy-data:/data
+
+volumes:
+  raddy-data:
+```
+
+The image is available for `linux/amd64` and `linux/arm64`. Images can also be loaded from the release archives with `docker load`. To build from a checkout instead, replace `image:` with `build: .` and run `docker compose build`.
+
+With host networking, omit `ports:`. Raddy binds directly on the host: make sure the ports are free and restrict access to internal listeners with `bind` or a firewall. An upstream such as `127.0.0.1:10001` can reach Xray running on the same Linux host. The mounted configuration and any mounted certificates must be readable by UID `10001`.
+
+### Cloudflare DNS-01
+
+For automatic HTTPS, put `.env` next to `compose.yaml` and run Docker Compose from that directory:
+
+```dotenv
+CF_API_TOKEN=your_cloudflare_token
+```
+
+Use a token scoped to the relevant zones, with **Zone:Read** and **DNS:Edit**. To split permissions, set `zone_token` to a separate **Zone:Read** token and leave only **DNS:Edit** on `api_token`. Do not commit `.env`. A value exported in your shell overrides `.env`. If you do not use Cloudflare DNS-01, omit the token.
+
+For example, use this `Raddyfile`, replacing `app.example.com` and the upstream with your own:
+
+```caddyfile
+{
+    data_dir /data/raddy-data
+    cloudflare {
+        api_token {env.CF_API_TOKEN}
+    }
+}
+
+app.example.com {
+    reverse_proxy http://127.0.0.1:10001
+}
+```
+
+```sh
+docker compose run --rm raddy validate
+docker compose up -d
+```
+
+Validation checks the configuration and configured PEM files, but does not contact the certificate authority. Before deploying, test issuance against ACME staging and keep a backup of `data_dir` outside the source tree. To use existing PEM files instead of ACME, set `tls /path/to/cert.pem /path/to/key.pem` in the site block.
+
+## Routing, TLS passthrough, and PROXY protocol
+
+Use `reverse_proxy http://…` for HTTP/1.1 upstreams, including WebSocket upgrades. Use `reverse_proxy h2c://…` for an unencrypted HTTP/2 upstream, such as a gRPC service behind Raddy TLS termination. `handle` keeps the path; `handle_path` strips the matched prefix.
+
+```caddyfile
+tls://pass.example.com:443 {
+    proxy 127.0.0.1:10002
+}
+
+*.example.com {
+    respond "HTTPS terminated by Raddy"
+}
+
+tcp://:443 {
+    proxy 127.0.0.1:10003
+}
+```
+
+Configure Cloudflare DNS-01 or existing PEM files for the HTTPS site. `tls://` inspects ClientHello for SNI and forwards the original TLS bytes to the upstream; it does not terminate TLS. Matching order on a shared port is exact SNI, single-label wildcard, `tls://*:port`, then the optional TCP fallback. HTTPS and passthrough cannot use the same SNI pattern, and listeners sharing a port must use the same bind address. SNI is routing information, not authentication.
+
+Enable outgoing `proxy_protocol v1` or `proxy_protocol v2` inside `proxy` or `reverse_proxy` only if the upstream expects it. For HTTP reverse proxying, it prevents pooling upstream connections across requests. Incoming `proxy_protocol_accept` is a per-port setting: configure it only behind a trusted load balancer and list its IP addresses or CIDRs. On such ports, clients without a PROXY header or from an untrusted address are rejected.
+
+## Operating Raddy
+
+- On Unix, send `SIGUSR1` to reload configuration and imported files (`docker compose kill -s SIGUSR1 raddy`). If the reload fails, the old configuration remains active. Established TCP, TLS passthrough, and WebSocket tunnels are preserved during reload.
+- On `SIGTERM` or `SIGINT`, Raddy stops accepting new connections and gives active traffic up to 30 seconds to finish by default. Use `run --grace-period-secs` to adjust this and give the container a longer `stop_grace_period`.
+- The global `max_connections` option limits accepted client TCP connections across ports (`0` disables the limit). It does not limit HTTP/2 streams or account for upstream file descriptors. Set host file-descriptor limits and load-test with your expected workload.
+- Static files support conditional requests and single byte ranges. On Unix, file cache entries can hold file bodies up to 16 KiB; the default cache stores up to 1,024 entries, with a 30-second TTL. Small files can stay cached after replacement or deletion until that TTL expires. Large files are streamed. To reopen paths for every request, set `static_cache_ttl 0s` in the global block.
+- Keep production configuration, tokens, certificates, and ACME storage outside your static file root. Without a trusted PROXY protocol listener, Raddy uses the immediate peer address for `X-Forwarded-For`, not a chain supplied by the client.
+
+## Validation and tests
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+cargo build --locked --release
+python3 tests/network.py target/release/raddy
+# With Caddy 2.10.2 on PATH:
+python3 tests/caddy_parity.py target/release/raddy
+```
+
+## Compatibility
+
+Raddy supports common Caddyfile directives including `respond`, `reverse_proxy`, `root`, `file_server`, `handle`, `handle_path`, `route`, `rewrite`, `try_files`, `header`, and `import`, but their full Caddy semantics are not guaranteed. Unsupported directives are rejected at configuration time. There is no Caddy admin API, plugin loading, HTTP/3, UDP proxying, `file_server browse`, internal or on-demand TLS, or ACME HTTP-01/TLS-ALPN-01. WebSocket upgrades use HTTP/1.1; extended CONNECT over HTTP/2 is not supported. See the [detailed compatibility notes](CONFIGURATION.ru.md#границы-совместимости).

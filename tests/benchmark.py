@@ -8,6 +8,7 @@ import re
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,6 +22,10 @@ def port():
 
 class Backend(ThreadingHTTPServer):
     request_queue_size = 256
+
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            super().handle_error(request, client_address)
 
     def process_request_thread(self, request, address):
         if self.proxy:
@@ -110,6 +115,42 @@ http {{
 '''
 
 
+def caddy_config(root, plain, secure, backend):
+    return f'''
+{{
+    admin off
+    persist_config off
+    auto_https disable_redirects
+    servers {{
+        protocols h1
+    }}
+}}
+http://localhost:{plain} {{
+    bind 127.0.0.1
+    root {root}/public
+    file_server
+}}
+https://localhost:{secure} {{
+    bind 127.0.0.1
+    tls {root}/cert.pem {root}/key.pem {{
+        protocols tls1.3
+    }}
+    handle /proxy {{
+        reverse_proxy http://127.0.0.1:{backend} {{
+            flush_interval -1
+            transport http {{
+                versions 1.1
+            }}
+        }}
+    }}
+    handle {{
+        root {root}/public
+        file_server
+    }}
+}}
+'''
+
+
 def raddy_config(root, plain, secure, backend, proxy_backend):
     return f'''
 {{
@@ -138,6 +179,73 @@ https://localhost {{
     }}
 }}
 '''
+
+
+def layer4_command(implementation, binary, root, plain, secure, backend, secure_backend, stream_module):
+    if implementation == "nginx":
+        cfg = root / "stream.conf"
+        cfg.write_text(f'''load_module "{stream_module}";
+worker_processes 1;
+error_log stderr error;
+pid {root}/stream.pid;
+events {{ worker_connections 4096; }}
+stream {{
+    map $ssl_preread_server_name $target {{
+        localhost 127.0.0.1:{secure_backend};
+        default "";
+    }}
+    server {{
+        listen 127.0.0.1:{plain};
+        proxy_pass 127.0.0.1:{backend};
+    }}
+    server {{
+        listen 127.0.0.1:{secure};
+        ssl_preread on;
+        proxy_pass $target;
+    }}
+}}
+''')
+        return [binary, "-p", str(root), "-c", str(cfg), "-g", "daemon off;"]
+    if implementation == "caddy":
+        cfg = root / "layer4.json"
+
+        def route(port):
+            return {"handle": [{"handler": "proxy", "upstreams": [{"dial": [f"127.0.0.1:{port}"]}]}]}
+
+        secure_route = route(secure_backend)
+        secure_route["match"] = [{"tls": {"sni": ["localhost"]}}]
+        cfg.write_text(json.dumps({"admin": {"disabled": True, "config": {"persist": False}},
+                                   "apps": {"layer4": {"servers": {
+                                       "tcp": {"listen": [f"127.0.0.1:{plain}"], "routes": [route(backend)]},
+                                       "tls": {"listen": [f"127.0.0.1:{secure}"], "routes": [secure_route]},
+                                   }}}}))
+        return [binary, "run", "--config", str(cfg)]
+    cfg = root / "Layer4.Raddyfile"
+    cfg.write_text(f'''tcp://127.0.0.1:{plain} {{
+    proxy 127.0.0.1:{backend}
+}}
+tls://localhost:{secure} {{
+    bind 127.0.0.1
+    proxy 127.0.0.1:{secure_backend}
+}}
+''')
+    return [binary, "--config", str(cfg), "run", "--grace-period-secs", "0"]
+
+
+def stop(process):
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=3)
+
+
+def distinct_ports(*excluded):
+    while True:
+        first, second = port(), port()
+        if first != second and first not in excluded and second not in excluded:
+            return first, second
 
 
 def main(args):
@@ -173,37 +281,68 @@ end
             threading.Thread(target=server.serve_forever, daemon=True).start()
             stack.callback(server.shutdown)
             backends.append(server.server_address[1])
-        print(json.dumps({"raddy": subprocess.check_output([args.raddy, "--version"], text=True).strip(),
-                          "nginx": subprocess.run([args.nginx, "-v"], capture_output=True, text=True, check=True).stderr.strip(),
+        if args.layer4:
+            tcp_backend, tls_backend = distinct_ports(*backends)
+            cfg = root / "backend.conf"
+            cfg.write_text(nginx_config(root, tcp_backend, tls_backend, backends[0]))
+            log = stack.enter_context((root / "backend.log").open("w+"))
+            process = subprocess.Popen(["taskset", "-c", str(cpus[2]), args.nginx, "-p", str(root),
+                                        "-c", str(cfg), "-g", "daemon off;"], stdout=log, stderr=subprocess.STDOUT)
+            stack.callback(stop, process)
+            wait_ready(process, tls_backend, log, root / "cert.pem")
+        versions = {"raddy": subprocess.check_output([args.raddy, "--version"], text=True).strip(),
+                    "nginx": subprocess.run([args.nginx, "-v"], capture_output=True, text=True, check=True).stderr.strip()}
+        if args.caddy:
+            versions["caddy"] = subprocess.check_output([args.caddy, "version"], text=True).strip()
+        if args.baseline:
+            versions["raddy-baseline"] = subprocess.check_output([args.baseline, "--version"], text=True).strip()
+        print(json.dumps({**versions,
                           "kernel": os.uname().release, "machine": os.uname().machine,
                           "available_cpus": len(cpus), "server_cpus": 1, "generator_cpus": 1,
                           "backend_cpu": cpus[2], "seconds": args.seconds, "connections": args.connections,
-                          "runs": args.runs}), flush=True)
+                          "runs": args.runs, "mode": "layer4" if args.layer4 else "http"}), flush=True)
         implementations = [("nginx", args.nginx), ("raddy", args.raddy)]
+        if args.caddy:
+            implementations.insert(0, ("caddy", args.caddy))
         if args.baseline:
-            implementations.insert(1, ("raddy-baseline", args.baseline))
+            implementations.insert(-1, ("raddy-baseline", args.baseline))
+        occupied = backends + ([tcp_backend, tls_backend] if args.layer4 else [])
         for implementation, binary in implementations:
-            plain, secure = port(), port()
-            while secure == plain:
-                secure = port()
-            if implementation == "nginx":
+            plain, secure = distinct_ports(*occupied)
+            if args.layer4:
+                cmd = layer4_command(implementation, binary, root, plain, secure, tcp_backend,
+                                     tls_backend, args.nginx_stream_module)
+            elif implementation == "nginx":
                 cfg = root / "nginx.conf"
                 cfg.write_text(nginx_config(root, plain, secure, backends[0]))
                 cmd = [binary, "-p", str(root), "-c", str(cfg), "-g", "daemon off;"]
+            elif implementation == "caddy":
+                cfg = root / "Caddyfile"
+                cfg.write_text(caddy_config(root, plain, secure, backends[0]))
+                cmd = [binary, "run", "--config", str(cfg)]
             else:
                 cfg = root / "Raddyfile"
                 cfg.write_text(raddy_config(root, plain, secure, *backends))
                 cmd = [binary, "--config", str(cfg), "run", "--grace-period-secs", "0"]
             with (root / f"{implementation}.log").open("w+") as log:
-                process = subprocess.Popen(["taskset", "-c", str(cpus[0]), *cmd], stdout=log, stderr=subprocess.STDOUT)
+                process = subprocess.Popen(["taskset", "-c", str(cpus[0]), *cmd], stdout=log, stderr=subprocess.STDOUT,
+                                           env={**os.environ, "GOMAXPROCS": "1", "TOKIO_WORKER_THREADS": "1"})
                 try:
                     wait_ready(process, secure, log, root / "cert.pem")
+                    wait_ready(process, plain, log)
+                    if args.layer4:
+                        assert_sni_rejected(secure, root / "cert.pem")
                     pids = [process.pid, *(nginx_workers(process.pid) if implementation == "nginx" else [])]
-                    cases = [("http-static", "keep", f"http://127.0.0.1:{plain}/sample"),
+                    cases = [("http-static", "keep", f"http://localhost:{plain}/sample"),
                              ("tls-keepalive", "keep", f"https://localhost:{secure}/sample"),
                              ("tls-reconnect", "new", f"https://localhost:{secure}/sample"),
                              ("streaming-post", "post", f"https://localhost:{secure}/proxy")]
-                    if implementation != "nginx":
+                    if args.layer4:
+                        cases = [("tcp-keepalive", "keep", f"http://localhost:{plain}/sample"),
+                                 ("tcp-reconnect", "new", f"http://localhost:{plain}/sample"),
+                                 ("tls-passthrough-keepalive", "keep", f"https://localhost:{secure}/sample"),
+                                 ("tls-passthrough-reconnect", "new", f"https://localhost:{secure}/sample")]
+                    elif implementation in ("raddy", "raddy-baseline"):
                         cases.append(("streaming-post-proxy-v1", "post", f"https://localhost:{secure}/proxy-pp"))
                     for label, script, url in cases:
                         if args.case and label not in args.case:
@@ -222,23 +361,21 @@ end
                                               "cpu_seconds": round((cpu1-cpu0)/os.sysconf("SC_CLK_TCK"), 2),
                                               "rss_mib": round(max(rss0, rss1)/1048576, 1)}), flush=True)
                 finally:
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=3)
+                    stop(process)
 
 
-def wait_ready(process, port, log, cert):
-    context = ssl.create_default_context(cafile=str(cert))
+def wait_ready(process, port, log, cert=None):
+    context = ssl.create_default_context(cafile=str(cert)) if cert else None
     deadline = time.monotonic() + 6
     while True:
         try:
-            with socket.create_connection(("127.0.0.1", port), 1) as conn, context.wrap_socket(conn, server_hostname="localhost") as tls:
-                tls.sendall(b"GET /sample HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            with ExitStack() as connections:
+                conn = connections.enter_context(socket.create_connection(("127.0.0.1", port), 1))
+                if context:
+                    conn = connections.enter_context(context.wrap_socket(conn, server_hostname="localhost"))
+                conn.sendall(b"GET /sample HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 data = bytearray()
-                while chunk := tls.recv(4096):
+                while chunk := conn.recv(4096):
                     data.extend(chunk)
                 assert data.startswith(b"HTTP/1.1 200 ") and data.endswith(b"r" * 1024), data
                 return
@@ -249,6 +386,17 @@ def wait_ready(process, port, log, cert):
             time.sleep(0.05)
 
 
+def assert_sni_rejected(port, cert):
+    context = ssl.create_default_context(cafile=str(cert))
+    context.check_hostname = False
+    with socket.create_connection(("127.0.0.1", port), 2) as sock:
+        try:
+            with context.wrap_socket(sock, server_hostname="unmatched.example.test"):
+                raise AssertionError("Proxy forwarded an unmatched TLS SNI")
+        except (ssl.SSLEOFError, ConnectionResetError):
+            pass
+
+
 def sys_is_linux():
     return os.uname().sysname == "Linux"
 
@@ -257,13 +405,23 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("raddy", type=lambda path: str(Path(path).resolve()))
     parser.add_argument("--nginx", default="nginx")
+    parser.add_argument("--caddy", type=lambda path: str(Path(path).resolve()) if "/" in path else path,
+                        help="Include Caddy using this binary")
     parser.add_argument("--baseline", type=lambda path: str(Path(path).resolve()))
     parser.add_argument("--case", action="append", choices=("http-static", "tls-keepalive", "tls-reconnect",
-                                                             "streaming-post", "streaming-post-proxy-v1"))
+                                                             "streaming-post", "streaming-post-proxy-v1",
+                                                             "tcp-keepalive", "tcp-reconnect",
+                                                             "tls-passthrough-keepalive", "tls-passthrough-reconnect"))
+    parser.add_argument("--layer4", action="store_true", help="Compare TCP proxies and SNI-routed TLS passthrough")
+    parser.add_argument("--nginx-stream-module", type=lambda path: Path(path).resolve())
     parser.add_argument("--seconds", type=int, default=8)
     parser.add_argument("--connections", type=int, default=32)
     parser.add_argument("--runs", type=int, default=3)
     args = parser.parse_args()
     if min(args.seconds, args.connections, args.runs) < 1:
         parser.error("seconds, connections and runs must be positive")
+    if args.layer4 and not args.nginx_stream_module:
+        parser.error("--layer4 requires --nginx-stream-module")
+    if args.case and any((case.startswith(("tcp-", "tls-passthrough-"))) != args.layer4 for case in args.case):
+        parser.error("use --layer4 only with TCP and TLS passthrough cases")
     main(args)
