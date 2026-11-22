@@ -19,7 +19,7 @@ Save `compose.yaml` next to your `Raddyfile`:
 ```yaml
 services:
   raddy:
-    image: ghcr.io/rawtls/raddy:v0.4.0
+    image: ghcr.io/rawtls/raddy:v0.4.1
     container_name: raddy
     restart: unless-stopped
     stop_grace_period: 35s
@@ -99,7 +99,21 @@ Configure Cloudflare DNS-01 or existing PEM files for the HTTPS site. `tls://` i
 
 Enable outgoing `proxy_protocol v1` or `proxy_protocol v2` inside `proxy` or `reverse_proxy` only if the upstream expects it. For HTTP reverse proxying, it prevents pooling upstream connections across requests. Incoming `proxy_protocol_accept` is a per-port setting: configure it only behind a trusted load balancer and list its IP addresses or CIDRs. On such ports, clients without a PROXY header or from an untrusted address are rejected.
 
+### Per-route HTTP proxy timeouts
+
+```caddyfile
+reverse_proxy http://127.0.0.1:10001 {
+    connect_timeout 10s
+    response_header_timeout 30s
+    stream_idle_timeout 5m
+}
+```
+
+These Raddy-specific options take positive whole-second durations. `connect_timeout` sets the TCP dial timeout (default 10s, not a TLS handshake timeout). `response_header_timeout` bounds the wait for upstream headers across attempts; upload progress extends it. `stream_idle_timeout` limits idle time waiting for response frames after the headers; request-body activity on **the same HTTP exchange** also extends it. It does not combine activity from separate XHTTP requests or change WebSocket tunnels after Upgrade. Without a route override the global `request_timeout` still applies as before. In JSON use `connect_timeout_secs`, `response_header_timeout_secs`, `stream_idle_timeout_secs` in `proxy`. Available since v0.4.1.
+
 ## Operating Raddy
+
+On HTTPS termination listeners, connections closed before TLS completes, invalid TLS record types, and handshake timeouts are logged individually at debug level. At info level a nonempty `TLS handshake summary` reports counts per listener every minute (and on configuration drain). Other handshake failures and post-handshake decryption errors remain warnings. No client IP or SNI is included in the summary.
 
 - Raddy uses one HTTP and one HTTPS listener. Sites that share a listener must agree on the effective `bind` address (the explicit site address, the global `http_addr`/`https_addr`, or `default_bind`). Conflicting addresses and duplicate site names on the same protocol are rejected.
 - In Caddyfile syntax, `root` sets a directory but does not serve it on its own: add `file_server`. In the legacy JSON site format, `root` still enables static serving.

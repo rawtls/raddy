@@ -392,6 +392,36 @@ fn rejects_unsupported_or_ambiguous_http_routes() {
 }
 
 #[test]
+fn proxy_timeouts_are_validated_and_round_trip_through_json() {
+    let config = parse(":8080 { reverse_proxy localhost:9000 { connect_timeout 3s response_header_timeout 4s stream_idle_timeout 2m } }").unwrap();
+    let json = serde_json::to_string(&config).unwrap();
+    let config: crate::config::Config = serde_json::from_str(&json).unwrap();
+    config.validate().unwrap();
+    let proxy = &config.sites[0].proxy;
+    assert_eq!(
+        (
+            proxy.connect_timeout_secs,
+            proxy.response_header_timeout_secs,
+            proxy.stream_idle_timeout_secs
+        ),
+        (Some(3), Some(4), Some(120))
+    );
+    for setting in [
+        "connect_timeout 0",
+        "response_header_timeout 0",
+        "stream_idle_timeout 0",
+        "stream_idle_timeout 1s stream_idle_timeout 2s",
+    ] {
+        assert!(
+            parse(&format!(
+                ":8080 {{ reverse_proxy localhost:9000 {{ {setting} }} }}"
+            ))
+            .is_err()
+        );
+    }
+}
+
+#[test]
 fn parses_proxy_health_retries_and_literal_header_operations() {
     let config = parse(
         r#":8080 {

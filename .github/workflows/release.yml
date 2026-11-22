@@ -80,6 +80,7 @@ jobs:
           docker cp raddy-smoke:/usr/local/bin/raddy "$tmp/raddy"
           python3 tests/network.py "$tmp/raddy"
           python3 -B tests/http_proxy.py "$tmp/raddy"
+          python3 -B tests/tls_logging.py "$tmp/raddy"
           mkdir dist
           cp tests/xray_soak.py LICENSE NOTICE "$tmp/"
           tar -C "$tmp" -czf "dist/raddy-linux-$ARCH.tar.gz" raddy xray_soak.py LICENSE NOTICE

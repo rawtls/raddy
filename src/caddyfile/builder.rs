@@ -840,6 +840,20 @@ impl Builder {
                             one_arg(child)?;
                             site.proxy.lb_retries = parse_number(child_args[0], &child.args[0])?;
                         }
+                        "connect_timeout" | "response_header_timeout" | "stream_idle_timeout" => {
+                            no_children(child)?;
+                            let timeout = duration_arg(child)?;
+                            let slot = match child.name.text.as_str() {
+                                "connect_timeout" => &mut site.proxy.connect_timeout_secs,
+                                "response_header_timeout" => {
+                                    &mut site.proxy.response_header_timeout_secs
+                                }
+                                _ => &mut site.proxy.stream_idle_timeout_secs,
+                            };
+                            if slot.replace(timeout).is_some() {
+                                return Err(at(&child.name, "duplicate reverse_proxy timeout"));
+                            }
+                        }
                         "health_uri" => {
                             no_children(child)?;
                             one_arg(child)?;

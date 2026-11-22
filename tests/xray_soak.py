@@ -175,6 +175,7 @@ def run(args):
         rconfig = root / "Raddyfile"
 
         def configure(marker):
+            route_timeouts = (f" {{\n   response_header_timeout {args.idle}s\n   stream_idle_timeout {args.idle}s\n  }}" if args.route_timeouts else "")
             config = f'''{{
  default_bind 127.0.0.1
  http_port {http_port}
@@ -190,7 +191,7 @@ https://{WEB}:{https} {{
   reverse_proxy http://127.0.0.1:{back["ws"]}
  }}
  handle /xhttp* {{
-  reverse_proxy {xhttp_scheme}://127.0.0.1:{back["xhttp"]}
+  reverse_proxy {xhttp_scheme}://127.0.0.1:{back["xhttp"]}{route_timeouts}
  }}
  handle /rc.Service/* {{
   reverse_proxy h2c://127.0.0.1:{back["grpc"]}
@@ -542,6 +543,7 @@ if __name__ == "__main__":
         choices=("packet-up", "stream-up", "stream-up-h2c"),
         default="packet-up",
     )
+    parser.add_argument("--route-timeouts", action="store_true", help="test opt-in duplex idle accounting on the XHTTP route")
     parser.add_argument("--seconds", type=int, default=45)
     parser.add_argument("--lanes", type=int, default=1)
     parser.add_argument("--idle", type=int, default=6)

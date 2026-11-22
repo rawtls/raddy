@@ -92,10 +92,98 @@ pub struct Server {
     sites: Arc<[Site]>,
     http_routes: HostRoutes,
     https_routes: HostRoutes,
+    clients: ProxyClients,
+    handshake_log: Arc<crate::tls_log::HandshakeLog>,
+}
+
+struct ProxyClients {
     client: ProxyClient,
     websocket_client: ProxyClient,
     h2c_client: Client<HttpConnector, Body>,
     connector: HttpConnector,
+}
+
+impl ProxyClients {
+    fn new(connect_timeout: Duration) -> Self {
+        let mut connector = HttpConnector::new();
+        connector.enforce_http(false);
+        connector.set_nodelay(true);
+        connector.set_connect_timeout(Some(connect_timeout));
+        let mut h2c_connector = connector.clone();
+        h2c_connector.enforce_http(true);
+        let h2c_client = Client::builder(TokioExecutor::new())
+            .pool_timer(TokioTimer::new())
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(128)
+            .http2_only(true)
+            .build(h2c_connector);
+        let websocket_connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .wrap_connector(connector.clone());
+        let proxy_connector = connector.clone();
+        let connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .wrap_connector(connector);
+        let client = Client::builder(TokioExecutor::new())
+            .pool_timer(TokioTimer::new())
+            .pool_idle_timeout(Duration::from_secs(90))
+            .pool_max_idle_per_host(128)
+            .build(connector);
+        Self {
+            client,
+            websocket_client: Client::builder(TokioExecutor::new()).build(websocket_connector),
+            h2c_client,
+            connector: proxy_connector,
+        }
+    }
+
+    async fn request_upstream(
+        &self,
+        upstream: &Upstream,
+        websocket: bool,
+        proxy_protocol: Option<ProxyVersion>,
+        addresses: Option<Addresses>,
+        request: Request<Body>,
+    ) -> Result<Response<Incoming>, BoxError> {
+        if let Some(version) = proxy_protocol {
+            let connector = ProxyConnector {
+                inner: self.connector.clone(),
+                version,
+                addresses,
+            };
+            let mut builder = Client::builder(TokioExecutor::new());
+            builder.pool_max_idle_per_host(0);
+            if upstream.scheme == http::uri::Scheme::HTTP {
+                return Ok(builder
+                    .http2_only(upstream.h2c)
+                    .build(connector)
+                    .request(request)
+                    .await?);
+            }
+            let tls = hyper_rustls::HttpsConnectorBuilder::new()
+                .with_webpki_roots()
+                .https_or_http()
+                .enable_http1();
+            let connector = if websocket {
+                tls.wrap_connector(connector)
+            } else {
+                tls.enable_http2().wrap_connector(connector)
+            };
+            return Ok(builder.build(connector).request(request).await?);
+        }
+        Ok(if upstream.h2c {
+            self.h2c_client.request(request).await?
+        } else if websocket {
+            self.websocket_client.request(request).await?
+        } else {
+            self.client.request(request).await?
+        })
+    }
 }
 
 #[derive(Default)]
@@ -141,6 +229,7 @@ struct Site {
 }
 
 struct ProxyHandler {
+    clients: Option<Box<ProxyClients>>,
     settings: ProxySettings,
     upstreams: Vec<Upstream>,
     header_up: Vec<HeaderOperation>,
@@ -152,6 +241,10 @@ impl ProxyHandler {
     fn new(upstreams: &[String], settings: &ProxySettings) -> Result<Arc<Self>> {
         settings.validate()?;
         Ok(Arc::new(Self {
+            clients: settings
+                .connect_timeout_secs
+                .filter(|&secs| secs != 10)
+                .map(|secs| Box::new(ProxyClients::new(Duration::from_secs(secs)))),
             settings: settings.clone(),
             upstreams: upstreams
                 .iter()
@@ -1524,87 +1617,13 @@ impl Server {
                 routes.insert(host, index);
             }
         }
-        let mut connector = HttpConnector::new();
-        connector.enforce_http(false);
-        connector.set_nodelay(true);
-        connector.set_connect_timeout(Some(Duration::from_secs(10)));
-        let mut h2c_connector = connector.clone();
-        h2c_connector.enforce_http(true);
-        let h2c_client = Client::builder(TokioExecutor::new())
-            .pool_timer(TokioTimer::new())
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(128)
-            .http2_only(true)
-            .build(h2c_connector);
-        let websocket_connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .wrap_connector(connector.clone());
-        let proxy_connector = connector.clone();
-        let connector = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .enable_http2()
-            .wrap_connector(connector);
-        let client = Client::builder(TokioExecutor::new())
-            .pool_timer(TokioTimer::new())
-            .pool_idle_timeout(Duration::from_secs(90))
-            .pool_max_idle_per_host(128)
-            .build(connector);
         Ok(Self {
             config: Arc::new(config),
             sites: sites.into(),
             http_routes,
             https_routes,
-            client,
-            websocket_client: Client::builder(TokioExecutor::new()).build(websocket_connector),
-            h2c_client,
-            connector: proxy_connector,
-        })
-    }
-
-    async fn request_upstream(
-        &self,
-        upstream: &Upstream,
-        websocket: bool,
-        proxy_protocol: Option<ProxyVersion>,
-        addresses: Option<Addresses>,
-        request: Request<Body>,
-    ) -> Result<Response<Incoming>, BoxError> {
-        if let Some(version) = proxy_protocol {
-            let connector = ProxyConnector {
-                inner: self.connector.clone(),
-                version,
-                addresses,
-            };
-            let mut builder = Client::builder(TokioExecutor::new());
-            builder.pool_max_idle_per_host(0);
-            if upstream.scheme == http::uri::Scheme::HTTP {
-                return Ok(builder
-                    .http2_only(upstream.h2c)
-                    .build(connector)
-                    .request(request)
-                    .await?);
-            }
-            let tls = hyper_rustls::HttpsConnectorBuilder::new()
-                .with_webpki_roots()
-                .https_or_http()
-                .enable_http1();
-            let connector = if websocket {
-                tls.wrap_connector(connector)
-            } else {
-                tls.enable_http2().wrap_connector(connector)
-            };
-            return Ok(builder.build(connector).request(request).await?);
-        }
-        Ok(if upstream.h2c {
-            self.h2c_client.request(request).await?
-        } else if websocket {
-            self.websocket_client.request(request).await?
-        } else {
-            self.client.request(request).await?
+            clients: ProxyClients::new(Duration::from_secs(10)),
+            handshake_log: Arc::default(),
         })
     }
 
@@ -1657,7 +1676,7 @@ impl Server {
                                     .header(HOST, upstream.authority.as_str())
                                     .version(if upstream.h2c { http::Version::HTTP_2 } else { http::Version::HTTP_11 })
                                     .body(Full::new(Bytes::new()).map_err(|never| match never {}).boxed())?;
-                                let response = server.request_upstream(upstream, false, proxy.settings.proxy_protocol, None, request).await?;
+                                let response = proxy.clients.as_deref().unwrap_or(&server.clients).request_upstream(upstream, false, proxy.settings.proxy_protocol, None, request).await?;
                                 Ok::<_, BoxError>(response.status() == StatusCode::OK)
                             }) => matches!(result, Ok(Ok(true))),
                         };
@@ -1720,6 +1739,8 @@ impl Server {
         let store = CertificateStore::new(self.config.clone(), cloudflare);
         store.provision().await?;
         store.spawn_renewals(stop.clone());
+        self.handshake_log
+            .start(self.config.https_addr, stop.clone());
         let mut tls_config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(store.resolver());
@@ -2230,14 +2251,22 @@ impl Server {
             }
             let request = Request::from_parts(attempt, body.take().unwrap_or_else(empty_body));
             let result = response_deadline(
-                self.request_upstream(
-                    upstream,
-                    websocket.is_some(),
-                    proxy.settings.proxy_protocol,
-                    connections.addresses,
-                    request,
-                ),
-                self.config.request_timeout(),
+                proxy
+                    .clients
+                    .as_deref()
+                    .unwrap_or(&self.clients)
+                    .request_upstream(
+                        upstream,
+                        websocket.is_some(),
+                        proxy.settings.proxy_protocol,
+                        connections.addresses,
+                        request,
+                    ),
+                proxy
+                    .settings
+                    .response_header_timeout_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| self.config.request_timeout()),
                 start_time,
                 progress.as_ref(),
             )
@@ -2330,7 +2359,15 @@ impl Server {
         HeaderOperation::apply_all(&proxy.header_down, &mut parts.headers);
         Ok(Response::from_parts(
             parts,
-            upstream_body(body, self.config.request_timeout()),
+            upstream_body(
+                body,
+                proxy
+                    .settings
+                    .stream_idle_timeout_secs
+                    .map(Duration::from_secs)
+                    .unwrap_or_else(|| self.config.request_timeout()),
+                progress.filter(|_| proxy.settings.stream_idle_timeout_secs.is_some()),
+            ),
         ))
     }
 
@@ -2416,8 +2453,8 @@ impl Server {
                 peer,
                 serve_connection_with_drain(stream, self, peer, true, connections).await,
             ),
-            Ok(Err(error)) => warn!(%peer, %error, "TLS handshake failed"),
-            Err(_) => tracing::debug!(%peer, "TLS handshake timed out"),
+            Ok(Err(error)) => self.handshake_log.failed(peer, error),
+            Err(_) => self.handshake_log.timeout(peer),
         }
     }
 }
@@ -2621,30 +2658,43 @@ async fn response_deadline<T>(
     started: Instant,
     progress: Option<&tokio::sync::watch::Receiver<Instant>>,
 ) -> Result<T, BoxError> {
+    with_idle_timeout(future, idle, started, progress).await?
+}
+
+async fn with_idle_timeout<T>(
+    future: impl Future<Output = T>,
+    idle: Duration,
+    started: Instant,
+    progress: Option<&tokio::sync::watch::Receiver<Instant>>,
+) -> Result<T, UpstreamTimeout> {
     let mut future = std::pin::pin!(future);
     let mut last = started;
     loop {
         let Some(deadline) = last.checked_add(idle) else {
-            return future.await;
+            return Ok(future.await);
         };
         match timeout_at(deadline, future.as_mut()).await {
-            Ok(result) => return result,
+            Ok(result) => return Ok(result),
             Err(_) => {
                 let updated = progress.map(|receiver| *receiver.borrow());
                 match updated {
                     Some(updated) if updated > last && updated.elapsed() < idle => last = updated,
-                    _ => return Err(UpstreamTimeout.into()),
+                    _ => return Err(UpstreamTimeout),
                 }
             }
         }
     }
 }
 
-fn upstream_body(body: Incoming, idle: Duration) -> Body {
-    let stream = futures_util::stream::unfold(Some(body), move |body| async move {
-        let mut body = body?;
-        match timeout(idle, body.frame()).await {
-            Ok(Some(Ok(frame))) => Some((Ok(frame), Some(body))),
+fn upstream_body(
+    body: Incoming,
+    idle: Duration,
+    progress: Option<tokio::sync::watch::Receiver<Instant>>,
+) -> Body {
+    let stream = futures_util::stream::unfold(Some((body, progress)), move |state| async move {
+        let (mut body, progress) = state?;
+        match with_idle_timeout(body.frame(), idle, Instant::now(), progress.as_ref()).await {
+            Ok(Some(Ok(frame))) => Some((Ok(frame), Some((body, progress)))),
             Ok(Some(Err(error))) => Some((Err(BoxError::from(error)), None)),
             Ok(None) => None,
             Err(_) => Some((
@@ -2965,7 +3015,7 @@ mod tests {
             .unwrap();
         upstream_tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         let mut server = Server::new(config).unwrap();
-        server.client = Client::builder(TokioExecutor::new()).build(
+        server.clients.client = Client::builder(TokioExecutor::new()).build(
             hyper_rustls::HttpsConnectorBuilder::new()
                 .with_tls_config(client_tls)
                 .https_only()

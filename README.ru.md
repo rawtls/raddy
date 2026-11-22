@@ -19,7 +19,7 @@ Raddy — обратный прокси и файловый сервер на Ru
 ```sh
 docker run --rm -p 127.0.0.1:8080:8080 \
   --mount type=bind,src="$PWD/Raddyfile",dst=/etc/raddy/Raddyfile,readonly \
-  ghcr.io/rawtls/raddy:v0.4.0
+  ghcr.io/rawtls/raddy:v0.4.1
 ```
 
 Откройте `http://127.0.0.1:8080/`. Для этого примера не нужны домен или токен Cloudflare. Для развёртывания на Linux есть [пример Docker Compose](docs/CONFIGURATION.ru.md#docker-compose-linux-сеть-хоста) с отдельным томом для сертификатов и ротацией логов.

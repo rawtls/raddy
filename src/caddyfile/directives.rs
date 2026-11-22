@@ -99,6 +99,7 @@ fn fixed_argument_count(directive: &Directive) -> Option<usize> {
         | "stream_handshake_timeout"
         | "stream_max_handshake_bytes"
         | "connect_timeout"
+        | "response_header_timeout"
         | "idle_timeout"
         | "handshake_timeout"
         | "max_handshake_bytes"

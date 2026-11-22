@@ -126,6 +126,12 @@ pub struct SiteConfig {
 pub struct ProxySettings {
     pub lb_policy: ProxyPolicy,
     pub lb_retries: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_header_timeout_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout_secs: Option<u64>,
     pub health_uri: Option<String>,
     pub health_interval_secs: Option<u64>,
     pub health_timeout_secs: Option<u64>,
@@ -150,6 +156,15 @@ pub struct ProxyHeader {
 
 impl ProxySettings {
     pub(crate) fn validate(&self) -> Result<()> {
+        if [
+            self.connect_timeout_secs,
+            self.response_header_timeout_secs,
+            self.stream_idle_timeout_secs,
+        ]
+        .contains(&Some(0))
+        {
+            bail!("reverse_proxy timeouts must be positive");
+        }
         if let Some(path) = &self.health_uri {
             if !path.starts_with('/')
                 || path.contains('#')
