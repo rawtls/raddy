@@ -91,8 +91,8 @@ pub struct Server {
     config: Arc<Config>,
     sites: Arc<[Site]>,
     http_routes: HostRoutes,
-    https_routes: HostRoutes,
-    clients: ProxyClients,
+    https_routes: Arc<HostRoutes>,
+    clients: Arc<ProxyClients>,
     handshake_log: Arc<crate::tls_log::HandshakeLog>,
 }
 
@@ -1609,6 +1609,9 @@ impl Server {
         let mut https_routes = HostRoutes::default();
         for (index, site) in sites.iter().enumerate() {
             let routes = if site.config.tls {
+                if site.config.listen.unwrap_or(config.https_addr) != config.https_addr {
+                    continue;
+                }
                 &mut https_routes
             } else {
                 &mut http_routes
@@ -1621,8 +1624,8 @@ impl Server {
             config: Arc::new(config),
             sites: sites.into(),
             http_routes,
-            https_routes,
-            clients: ProxyClients::new(Duration::from_secs(10)),
+            https_routes: Arc::new(https_routes),
+            clients: Arc::new(ProxyClients::new(Duration::from_secs(10))),
             handshake_log: Arc::default(),
         })
     }
@@ -1696,56 +1699,67 @@ impl Server {
     pub async fn run(self, cloudflare: Option<Arc<crate::cloudflare::Cloudflare>>) -> Result<()> {
         let server = Arc::new(self);
         let stop = tokio_util::sync::CancellationToken::new();
-        let tls = server.tls_acceptor(cloudflare, &stop).await?;
-        server.spawn_health_checks(&stop);
-        let _stop = stop.drop_guard();
-        let http_listener = TcpListener::bind(server.config.http_addr)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to bind HTTP listener on {}",
-                    server.config.http_addr
-                )
-            })?;
-        info!(address = %server.config.http_addr, "HTTP server listening");
-        if let Some(tls) = tls {
-            let https_listener = TcpListener::bind(server.config.https_addr)
+        let _stop = stop.clone().drop_guard();
+        let listeners = server.tls_endpoints(cloudflare, &stop).await?;
+        let mut tasks = tokio::task::JoinSet::new();
+        let http = TcpListener::bind(server.config.http_addr).await?;
+        for (address, view, acceptor) in listeners {
+            let socket = TcpListener::bind(address)
                 .await
-                .with_context(|| {
-                    format!(
-                        "failed to bind HTTPS listener on {}",
-                        server.config.https_addr
-                    )
-                })?;
-            info!(address = %server.config.https_addr, "HTTPS server listening");
-            tokio::try_join!(
-                accept_loop(http_listener, server.clone(), None),
-                accept_loop(https_listener, server, Some(tls)),
-            )?;
-        } else {
-            accept_loop(http_listener, server, None).await?;
+                .with_context(|| format!("could not bind HTTPS listener on {address}"))?;
+            tasks.spawn(accept_loop(socket, view, Some(acceptor)));
+        }
+        server.spawn_health_checks(&stop);
+        tasks.spawn(accept_loop(http, server, None));
+        while let Some(result) = tasks.join_next().await {
+            result??;
         }
         Ok(())
     }
 
-    pub(crate) async fn tls_acceptor(
-        &self,
+    pub(crate) async fn tls_endpoints(
+        self: &Arc<Self>,
         cloudflare: Option<Arc<crate::cloudflare::Cloudflare>>,
         stop: &tokio_util::sync::CancellationToken,
-    ) -> Result<Option<TlsAcceptor>> {
-        if !self.sites.iter().any(|site| site.config.tls) {
-            return Ok(None);
+    ) -> Result<Vec<(SocketAddr, Arc<Self>, TlsAcceptor)>> {
+        let addresses = self.config.https_listeners();
+        if addresses.is_empty() {
+            return Ok(Vec::new());
         }
         let store = CertificateStore::new(self.config.clone(), cloudflare);
         store.provision().await?;
+        let mut endpoints = Vec::with_capacity(addresses.len());
+        for address in addresses {
+            let view = if address == self.config.https_addr {
+                self.clone()
+            } else {
+                let mut routes = HostRoutes::default();
+                for (index, site) in self.sites.iter().enumerate().filter(|(_, site)| {
+                    site.config.tls
+                        && site.config.listen.unwrap_or(self.config.https_addr) == address
+                }) {
+                    for host in &site.config.hosts {
+                        routes.insert(host, index);
+                    }
+                }
+                Arc::new(Self {
+                    config: self.config.clone(),
+                    sites: self.sites.clone(),
+                    http_routes: HostRoutes::default(),
+                    https_routes: Arc::new(routes),
+                    clients: self.clients.clone(),
+                    handshake_log: Arc::default(),
+                })
+            };
+            let mut tls = rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_cert_resolver(store.resolver_for(address));
+            tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            view.handshake_log.start(address, stop.clone());
+            endpoints.push((address, view, TlsAcceptor::from(Arc::new(tls))));
+        }
         store.spawn_renewals(stop.clone());
-        self.handshake_log
-            .start(self.config.https_addr, stop.clone());
-        let mut tls_config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_cert_resolver(store.resolver());
-        tls_config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
+        Ok(endpoints)
     }
 
     pub(crate) fn tls_sni_specificity(&self, sni: &str) -> Option<u8> {
@@ -2909,6 +2923,7 @@ mod tests {
 
     fn site(host: &str) -> SiteConfig {
         SiteConfig {
+            listen: None,
             hosts: vec![host.to_owned()],
             tls: false,
             certificate_file: None,
@@ -3015,14 +3030,15 @@ mod tests {
             .unwrap();
         upstream_tls.alpn_protocols = vec![b"http/1.1".to_vec()];
         let mut server = Server::new(config).unwrap();
-        server.clients.client = Client::builder(TokioExecutor::new()).build(
-            hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config(client_tls)
-                .https_only()
-                .enable_http1()
-                .enable_http2()
-                .build(),
-        );
+        Arc::get_mut(&mut server.clients).unwrap().client = Client::builder(TokioExecutor::new())
+            .build(
+                hyper_rustls::HttpsConnectorBuilder::new()
+                    .with_tls_config(client_tls)
+                    .https_only()
+                    .enable_http1()
+                    .enable_http2()
+                    .build(),
+            );
         let (relay, client) = tokio::io::duplex(8192);
         let relay = tokio::spawn(serve_connection(
             relay,

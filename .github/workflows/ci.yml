@@ -43,3 +43,4 @@ jobs:
           python3 tests/network.py target/debug/raddy
           python3 -B tests/http_proxy.py target/debug/raddy
           python3 -B tests/tls_logging.py target/debug/raddy
+          python3 -B tests/https_listeners.py target/debug/raddy

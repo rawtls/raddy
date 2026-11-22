@@ -35,7 +35,7 @@ const RENEW_BEFORE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 const RENEW_INTERVAL: Duration = Duration::from_secs(12 * 60 * 60);
 
 pub struct CertificateStore {
-    certificates: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+    certificates: RwLock<HashMap<usize, Arc<CertifiedKey>>>,
     config: Arc<Config>,
     cloudflare: Option<Arc<Cloudflare>>,
     account: OnceCell<Account>,
@@ -51,39 +51,74 @@ impl CertificateStore {
         })
     }
 
-    pub fn resolver(self: &Arc<Self>) -> Arc<Self> {
-        self.clone()
+    pub(crate) fn resolver_for(
+        self: &Arc<Self>,
+        address: std::net::SocketAddr,
+    ) -> Arc<dyn ResolvesServerCert> {
+        let mut names = HashMap::new();
+        for (index, site) in self.config.sites.iter().enumerate().filter(|(_, site)| {
+            site.tls && site.listen.unwrap_or(self.config.https_addr) == address
+        }) {
+            for host in &site.hosts {
+                names.insert(normalize_host(host), index);
+            }
+        }
+        Arc::new(ListenerCertificates {
+            store: self.clone(),
+            names,
+        })
     }
 
     pub async fn provision(&self) -> Result<()> {
         self.retry_cleanup().await;
-        for site in self.config.sites.iter().filter(|site| site.tls) {
-            match self.load_or_issue(&site.hosts).await {
-                Ok(certificate) => {
-                    for host in &site.hosts {
-                        self.certificates
-                            .write()
-                            .expect("certificate store lock poisoned")
-                            .insert(normalize_host(host), certificate.clone());
-                    }
+        self.refresh(false).await
+    }
+
+    async fn refresh(&self, renewal: bool) -> Result<()> {
+        let mut groups = std::collections::BTreeMap::new();
+        for (index, site) in self
+            .config
+            .sites
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.tls && (!renewal || s.certificate_file.is_none()))
+        {
+            groups
+                .entry((&site.hosts, &site.certificate_file, &site.private_key_file))
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+        for ((hosts, cert, key), sites) in groups {
+            let result = if let Some((cert, key)) = cert.as_ref().zip(key.as_ref()) {
+                load_pem_pair(cert, key, hosts).await
+            } else {
+                self.load_or_issue(hosts).await
+            };
+            let certificate = match result {
+                Ok(cert) => cert,
+                Err(error) if renewal => {
+                    warn!(?hosts, %error, "scheduled certificate renewal failed");
+                    continue;
                 }
                 Err(error) => {
-                    if site.certificate_file.is_none()
-                        && let Some(certificate) = self.load_existing(&site.hosts).await
+                    if cert.is_none()
+                        && let Some(old) = self.load_existing(hosts).await
                     {
-                        warn!(hosts = ?site.hosts, %error, "certificate renewal failed; using the existing certificate");
-                        for host in &site.hosts {
-                            self.certificates
-                                .write()
-                                .expect("certificate store lock poisoned")
-                                .insert(normalize_host(host), certificate.clone());
-                        }
+                        warn!(?hosts, %error, "certificate renewal failed; using the existing certificate");
+                        old
                     } else {
                         return Err(error).with_context(|| {
-                            format!("could not provision certificate for {:?}", site.hosts)
+                            format!("could not provision certificate for {hosts:?}")
                         });
                     }
                 }
+            };
+            let mut certificates = self
+                .certificates
+                .write()
+                .expect("certificate store lock poisoned");
+            for index in sites {
+                certificates.insert(index, certificate.clone());
             }
         }
         Ok(())
@@ -99,26 +134,8 @@ impl CertificateStore {
                         break;
                     };
                     store.retry_cleanup().await;
-                    for site in store
-                        .config
-                        .sites
-                        .iter()
-                        .filter(|site| site.tls && site.certificate_file.is_none())
-                    {
-                        match store.load_or_issue(&site.hosts).await {
-                            Ok(certificate) => {
-                                let mut certificates = store
-                                    .certificates
-                                    .write()
-                                    .expect("certificate store lock poisoned");
-                                for host in &site.hosts {
-                                    certificates.insert(normalize_host(host), certificate.clone());
-                                }
-                            }
-                            Err(error) => {
-                                warn!(hosts = ?site.hosts, %error, "scheduled certificate renewal failed")
-                            }
-                        }
+                    if let Err(error) = store.refresh(true).await {
+                        warn!(%error, "certificate renewal failed");
                     }
                 }
             };
@@ -127,19 +144,6 @@ impl CertificateStore {
     }
 
     async fn load_or_issue(&self, hosts: &[String]) -> Result<Arc<CertifiedKey>> {
-        let site = self
-            .config
-            .sites
-            .iter()
-            .find(|site| site.tls && site.hosts == hosts);
-        if let Some((certificate_path, key_path)) = site.and_then(|site| {
-            Some((
-                site.certificate_file.as_ref()?,
-                site.private_key_file.as_ref()?,
-            ))
-        }) {
-            return load_pem_pair(certificate_path, key_path, hosts).await;
-        }
         let _issuance = acquire_issuance_lock(&self.config.data_dir).await?;
         if let Some(certificate) = self.load_existing(hosts).await
             && certificate_lifetime(&certificate).is_ok_and(|remaining| remaining > RENEW_BEFORE)
@@ -454,17 +458,23 @@ impl std::fmt::Debug for CertificateStore {
     }
 }
 
-impl ResolvesServerCert for CertificateStore {
+#[derive(Debug)]
+struct ListenerCertificates {
+    store: Arc<CertificateStore>,
+    names: HashMap<String, usize>,
+}
+
+impl ResolvesServerCert for ListenerCertificates {
     fn resolve(&self, client_hello: rustls::server::ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let host = normalize_host(client_hello.server_name()?);
-        if let Ok(certificates) = self.certificates.read() {
-            if let Some(certificate) = certificates.get(&host) {
-                return Some(certificate.clone());
+        let index = self.names.get(&host).or_else(|| {
+            let (label, suffix) = host.split_once('.')?;
+            if label.is_empty() {
+                return None;
             }
-            let suffix = host.split_once('.').map(|(_, suffix)| suffix)?;
-            return certificates.get(&format!("*.{suffix}")).cloned();
-        }
-        None
+            self.names.get(&format!("*.{suffix}"))
+        })?;
+        self.store.certificates.read().ok()?.get(index).cloned()
     }
 }
 

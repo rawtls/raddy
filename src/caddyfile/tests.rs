@@ -762,6 +762,31 @@ fn listener_binds_are_independent_and_conflicts_are_rejected() {
 }
 
 #[test]
+fn wildcard_sites_are_scoped_to_the_https_listener_in_any_order() {
+    let global = format!("{{ cloudflare {TOKEN} }}");
+    let public = "*.eu2.example.test {\n handle /ws { reverse_proxy 127.0.0.1:10002 { proxy_protocol v2 } }\n handle { respond fallback }\n}";
+    let local = "https://*.eu2.example.test:9443 {\n bind 127.0.0.1\n handle {\n rewrite /private/\n reverse_proxy https://origin.example.test\n }\n}";
+    let pass = "tls://test.eu2.example.test:443 { proxy 127.0.0.1:10003 }";
+    for blocks in [[local, public, pass], [pass, public, local]] {
+        let config = parse(&format!("{global}\n{}", blocks.join("\n"))).unwrap();
+        let json = serde_json::to_vec(&config).unwrap();
+        let config: crate::config::Config = serde_json::from_slice(&json).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.https_addr.to_string(), "0.0.0.0:443");
+        assert_eq!(config.https_listeners().len(), 2);
+        assert!(
+            config
+                .https_listeners()
+                .contains(&"127.0.0.1:9443".parse().unwrap())
+        );
+        assert_eq!(config.streams[0].listen, config.https_addr);
+    }
+    let collision = "tls://*.eu2.example.test:443 { proxy 127.0.0.1:10003 }";
+    assert!(parse(&format!("{global}\n{local}\n{public}\n{collision}")).is_err());
+    assert!(parse(&format!("{global}\n{local}\n{collision}")).is_ok());
+}
+
+#[test]
 fn root_without_file_server_does_not_enable_static_files() {
     let config = parse("http://a.test { root ./public }").unwrap();
     assert!(config.sites[0].root.is_none());

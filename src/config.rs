@@ -96,6 +96,8 @@ pub struct CloudflareSettings {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct SiteConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<SocketAddr>,
     pub hosts: Vec<String>,
     #[serde(default = "default_true")]
     pub tls: bool,
@@ -309,11 +311,18 @@ impl Config {
         if self.max_header_size < 8192 {
             bail!("max_header_size must be at least 8192 bytes");
         }
-        if self.sites.iter().any(|site| site.tls) && self.https_addr.port() == 0 {
+        if self
+            .https_listeners()
+            .iter()
+            .any(|address| address.port() == 0)
+        {
             bail!("https_addr must use a fixed port when TLS is enabled");
         }
         let mut site_names = std::collections::BTreeSet::new();
         for (index, site) in self.sites.iter().enumerate() {
+            if !site.tls && site.listen.is_some() {
+                bail!("sites[{index}].listen is only supported for HTTPS");
+            }
             if site.hosts.is_empty() {
                 bail!("sites[{index}].hosts must not be empty");
             }
@@ -343,7 +352,12 @@ impl Config {
                     bail!("invalid host name {host:?} in sites[{index}]");
                 }
                 let normalized = host.trim_end_matches('.').to_ascii_lowercase();
-                if normalized.is_empty() || !site_names.insert((site.tls, normalized)) {
+                if normalized.is_empty()
+                    || !site_names.insert((
+                        site.tls.then(|| site.listen.unwrap_or(self.https_addr)),
+                        normalized,
+                    ))
+                {
                     bail!("empty or duplicate site name {host:?} in sites[{index}]");
                 }
                 if host == "*" && site.tls {
@@ -421,26 +435,39 @@ impl Config {
         Ok(())
     }
 
+    pub(crate) fn https_listeners(&self) -> std::collections::BTreeSet<SocketAddr> {
+        self.sites
+            .iter()
+            .filter(|s| s.tls)
+            .map(|s| s.listen.unwrap_or(self.https_addr))
+            .collect()
+    }
+
     fn validate_listener_ports(&self) -> Result<()> {
-        let https = self.sites.iter().any(|site| site.tls);
-        if https && self.http_addr.port() == self.https_addr.port() {
-            bail!(
-                "HTTP and HTTPS listeners cannot share TCP port {}",
-                self.https_addr.port()
-            );
-        }
-        let mut streams: BTreeMap<u16, (SocketAddr, bool, bool)> = BTreeMap::new();
+        let mut by_port = BTreeMap::new();
         let mut https_names = std::collections::BTreeSet::new();
-        if https {
-            for host in self
-                .sites
-                .iter()
-                .filter(|site| site.tls)
-                .flat_map(|site| &site.hosts)
+        for site in self.sites.iter().filter(|s| s.tls) {
+            let addr = site.listen.unwrap_or(self.https_addr);
+            if addr.port() == self.http_addr.port() {
+                bail!(
+                    "HTTP and HTTPS listeners cannot share TCP port {}",
+                    addr.port()
+                );
+            }
+            if by_port
+                .insert(addr.port(), addr)
+                .is_some_and(|prev| prev != addr)
             {
-                https_names.insert(host.trim_end_matches('.').to_ascii_lowercase());
+                bail!(
+                    "HTTPS sites on port {} must use the same bind address",
+                    addr.port()
+                );
+            }
+            for host in &site.hosts {
+                https_names.insert((addr, host.trim_end_matches('.').to_ascii_lowercase()));
             }
         }
+        let mut streams: BTreeMap<u16, (SocketAddr, bool, bool)> = BTreeMap::new();
         for (index, stream) in self.streams.iter().enumerate() {
             let port = stream.listen.port();
             if !self.sites.is_empty() && port == self.http_addr.port() {
@@ -448,19 +475,19 @@ impl Config {
                     "streams[{index}] conflicts with the HTTP listener on TCP port {port}; use a separate stream port"
                 );
             }
-            if https && port == self.https_addr.port() {
-                if stream.listen != self.https_addr {
+            if let Some(addr) = by_port.get(&port) {
+                if stream.listen != *addr {
                     bail!(
                         "streams[{index}] and HTTPS must use the same bind address to share TCP port {port}: {} != {}",
                         stream.listen.ip(),
-                        self.https_addr.ip()
+                        addr.ip()
                     );
                 }
                 if stream.mode == StreamMode::TlsPassthrough {
                     for route in &stream.routes {
                         if let Some(name) = &route.sni
                             && https_names
-                                .contains(&name.trim_end_matches('.').to_ascii_lowercase())
+                                .contains(&(*addr, name.trim_end_matches('.').to_ascii_lowercase()))
                         {
                             bail!(
                                 "duplicate SNI pattern {name:?} between TLS passthrough and HTTPS on TCP port {port}"
@@ -500,7 +527,9 @@ impl Config {
                     );
                 }
                 let has_listener = !self.sites.is_empty() && self.http_addr.port() == port
-                    || self.sites.iter().any(|site| site.tls) && self.https_addr.port() == port
+                    || self.sites.iter().any(|site| {
+                        site.tls && site.listen.unwrap_or(self.https_addr).port() == port
+                    })
                     || self
                         .streams
                         .iter()

@@ -243,16 +243,11 @@ impl Runtime {
         config.validate()?;
         let max_connections = config.max_connections;
         let http = (!config.sites.is_empty()).then_some(config.http_addr);
-        let https = config
-            .sites
-            .iter()
-            .any(|site| site.tls)
-            .then_some(config.https_addr);
         let mut addresses = std::collections::BTreeMap::new();
         for address in config.streams.iter().map(|stream| stream.listen) {
             addresses.insert(address, true);
         }
-        for address in http.into_iter().chain(https) {
+        for address in http.into_iter().chain(config.https_listeners()) {
             addresses.insert(address, false);
         }
         let mut new_listeners = Vec::new();
@@ -307,13 +302,9 @@ impl Runtime {
                 })
                 .transpose()?;
             let server = Arc::new(tokio::task::spawn_blocking(move || Server::new(config)).await??);
-            if let Some(https) = https {
-                let acceptor = server
-                    .tls_acceptor(cloudflare, &drain)
-                    .await?
-                    .context("HTTPS listener requires TLS")?;
+            for (https, view, acceptor) in server.tls_endpoints(cloudflare, &drain).await? {
                 stream_ports.entry(https).or_default().https = Some(HttpsEndpoint {
-                    server: server.clone(),
+                    server: view,
                     acceptor,
                     drain: drain.clone(),
                 });

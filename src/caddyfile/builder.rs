@@ -264,15 +264,14 @@ impl Builder {
                 return Err(at(&child.name, "conflicting bind addresses in site block"));
             }
         }
-        for tls in [false, true] {
-            let hosts = parsed
-                .iter()
-                .filter(|address| address.tls == tls)
-                .map(|address| address.host.clone())
-                .collect::<Vec<_>>();
-            if hosts.is_empty() {
-                continue;
-            }
+        let mut groups = BTreeMap::<(bool, Option<u16>), Vec<String>>::new();
+        for address in parsed {
+            groups
+                .entry((address.tls, address.port))
+                .or_default()
+                .push(address.host);
+        }
+        for ((tls, port), hosts) in groups {
             let mut site = SiteConfig {
                 hosts,
                 tls,
@@ -361,21 +360,17 @@ impl Builder {
                     site.root = None;
                 }
             }
-            for address in parsed.iter().filter(|address| address.tls == tls) {
-                let default_port = if site.tls {
-                    self.default_https_port
-                } else {
-                    self.default_http_port
-                };
+            if site.tls {
+                site.listen = Some(SocketAddr::new(
+                    bind.or(self.global_https_bind).unwrap_or(self.default_bind),
+                    port.unwrap_or(self.default_https_port),
+                ));
+            } else {
                 self.set_port(
-                    address.port.unwrap_or(default_port),
-                    site.tls,
+                    port.unwrap_or(self.default_http_port),
+                    false,
                     &directive.name,
                 )?;
-            }
-            if site.tls {
-                self.set_bind(true, bind, &directive.name)?;
-            } else {
                 self.set_bind(false, bind, &directive.name)?;
             }
             self.config.sites.push(site);
@@ -2304,6 +2299,14 @@ pub(super) fn build(tokens: &[Token]) -> Result<Config> {
         } else {
             builder.site(directive)?;
         }
+    }
+    let listeners = builder.config.https_listeners();
+    if let Some(primary) = listeners
+        .iter()
+        .find(|address| address.port() == builder.default_https_port)
+        .or_else(|| listeners.first().filter(|_| listeners.len() == 1))
+    {
+        builder.config.https_addr = *primary;
     }
     builder.config.validate()?;
     Ok(builder.config)
