@@ -19,7 +19,7 @@ Save `compose.yaml` next to your `Raddyfile`:
 ```yaml
 services:
   raddy:
-    image: ghcr.io/rawtls/raddy:v0.4.1
+    image: ghcr.io/rawtls/raddy:v0.5.0
     container_name: raddy
     restart: unless-stopped
     stop_grace_period: 35s
@@ -115,7 +115,7 @@ These Raddy-specific options take positive whole-second durations. `connect_time
 
 On HTTPS termination listeners, connections closed before TLS completes, invalid TLS record types, and handshake timeouts are logged individually at debug level. At info level a nonempty `TLS handshake summary` reports counts per listener every minute (and on configuration drain). Other handshake failures and post-handshake decryption errors remain warnings. No client IP or SNI is included in the summary.
 
-- Starting with v0.5.0-rc.1: Raddy supports multiple HTTPS ports with independent bind addresses, SNI certificates and HTTP routes. For example, `*.example.com` and `https://*.example.com:9443` with `bind 127.0.0.1` in the latter block can use different handlers. An exact `tls://pass.example.com:443` passthrough route affects only port 443. JSON HTTPS sites can set `listen` to an `IP:port`, defaulting to `https_addr`. Duplicate host patterns are rejected on the same endpoint, not across ports. One bind address per HTTPS port and one plain HTTP listener are supported. With multiple HTTPS ports, automatic HTTP redirects only target sites on the configured default HTTPS endpoint; a secondary-only host is not redirected to a private port.
+- Starting with v0.5.0: Raddy supports multiple HTTPS ports with independent bind addresses, SNI certificates and HTTP routes. For example, `*.example.com` and `https://*.example.com:9443` with `bind 127.0.0.1` in the latter block can use different handlers. An exact `tls://pass.example.com:443` passthrough route affects only port 443. JSON HTTPS sites can set `listen` to an `IP:port`, defaulting to `https_addr`. Duplicate host patterns are rejected on the same endpoint, not across ports. One bind address per HTTPS port and one plain HTTP listener are supported. With multiple HTTPS ports, automatic HTTP redirects only target sites on the configured default HTTPS endpoint; a secondary-only host is not redirected to a private port.
 - In Caddyfile syntax, `root` sets a directory but does not serve it on its own: add `file_server`. In the legacy JSON site format, `root` still enables static serving.
 - The proxy's `request_timeout` limits the wait for origin headers while upload progress is idle, then the pause between response frames. An active upload can take longer than this setting. Before origin headers, an idle timeout produces `504`; after headers it ends the response stream.
 - On Unix, send `SIGUSR1` to reload configuration and imported files (`docker compose kill -s SIGUSR1 raddy`). If the reload fails, the old configuration remains active. Established TCP, TLS passthrough, and WebSocket tunnels are preserved during reload.
