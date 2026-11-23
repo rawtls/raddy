@@ -19,7 +19,7 @@ Run it with Docker:
 ```sh
 docker run --rm -p 127.0.0.1:8080:8080 \
   --mount type=bind,src="$PWD/Raddyfile",dst=/etc/raddy/Raddyfile,readonly \
-  ghcr.io/rawtls/raddy:v0.5.0
+  ghcr.io/rawtls/raddy:v0.5.1
 ```
 
 Open `http://127.0.0.1:8080/`. You don't need a domain or a Cloudflare token for this example. [Docker Compose for Linux](docs/CONFIGURATION.md#docker-compose-linux-host-networking) shows how to deploy with persistent certificates and log rotation.

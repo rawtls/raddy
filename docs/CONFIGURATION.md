@@ -12,7 +12,7 @@ cargo build --locked --release
 ./target/release/raddy --config Raddyfile run
 ```
 
-### Multiple addresses in a site block (v0.5.1-rc.1)
+### Multiple addresses in a site block (v0.5.1)
 
 A trailing comma continues an HTTP(S) site address list on the next line. Comments and blank lines are allowed between addresses. Each address keeps its own port; the handlers and any `bind` apply to all of them.
 
@@ -33,7 +33,7 @@ Save `compose.yaml` next to your `Raddyfile`:
 ```yaml
 services:
   raddy:
-    image: ghcr.io/rawtls/raddy:v0.5.0
+    image: ghcr.io/rawtls/raddy:v0.5.1
     container_name: raddy
     restart: unless-stopped
     stop_grace_period: 35s
@@ -93,7 +93,7 @@ Automatic certificate caches are isolated by ACME directory URL. Bundles from ve
 
 ## Routing, TLS passthrough, and PROXY protocol
 
-**WebSocket close handling (v0.5.1-rc.1):** An upgraded connection has no idle timeout. Once Raddy reads EOF from either peer, the other direction has up to 10 seconds to finish before Raddy drops both sockets. This does not change TCP or TLS passthrough or the `stream_idle_timeout` setting.
+**WebSocket close handling (v0.5.1):** An upgraded connection has no idle timeout. Once Raddy reads EOF from either peer, the other direction has up to 10 seconds to finish before Raddy drops both sockets. This does not change TCP or TLS passthrough or the `stream_idle_timeout` setting.
 
 Use `reverse_proxy http://…` for HTTP/1.1 upstreams, including WebSocket upgrades. Use `reverse_proxy h2c://…` for an unencrypted HTTP/2 upstream, such as a gRPC service behind Raddy TLS termination. `handle` keeps the path; `handle_path` strips the matched prefix.
 
