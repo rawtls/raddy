@@ -229,28 +229,21 @@ impl Builder {
     }
 
     fn site(&mut self, directive: &Directive) -> Result<()> {
-        let mut addresses = Vec::new();
-        for address in std::iter::once(directive.name.text.as_str()).chain(strings(&directive.args))
-        {
-            for address in address.split(',').filter(|address| !address.is_empty()) {
-                addresses.push(address);
-            }
-        }
-        if addresses.is_empty() {
-            return Err(at(&directive.name, "site block requires an address"));
-        }
-        let parsed = addresses
-            .into_iter()
-            .map(|address| {
-                site_address(
+        let mut parsed = Vec::new();
+        for token in std::iter::once(&directive.name).chain(&directive.args) {
+            for address in token.text.split(',').filter(|address| !address.is_empty()) {
+                parsed.push(site_address(
                     address,
-                    &directive.name,
+                    token,
                     self.automatic_https,
                     self.default_http_port,
                     self.default_https_port,
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
+                )?);
+            }
+        }
+        if parsed.is_empty() {
+            return Err(at(&directive.name, "site block requires an address"));
+        }
         let mut bind = None;
         for child in directive
             .children

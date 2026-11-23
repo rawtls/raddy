@@ -217,8 +217,26 @@ def main(binary):
             )
         )
         check("127.0.0.2", public, "pass.multi.test", pass_cert[0], b"/tunnel/file")
+        cfg.write_text(
+            f"""{{
+ default_bind 127.0.0.1
+ http_port {http}
+ https_port {public}
+}}
+https://*.multi.test:{local},
+https://outside.test,
+other.multi.test {{
+ tls {public_cert[0]} {public_cert[1]}
+ respond shared
+}}
+"""
+        )
+        os.kill(proc.pid, signal.SIGUSR1)
+        wait_for(lambda: check("127.0.0.1", local, "app.multi.test", public_cert[0], b"shared"))
+        for sni in ("outside.test", "other.multi.test"):
+            check("127.0.0.1", public, sni, public_cert[0], b"shared")
         print(
-            "Independent HTTPS routes, certificates, SNI passthrough, redirects and reload passed"
+            "Independent HTTPS routes, certificates, SNI passthrough, redirects, reload and multiline site addresses passed"
         )
 
 

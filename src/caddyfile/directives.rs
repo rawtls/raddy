@@ -54,7 +54,17 @@ fn parse_directives(tokens: &[Token], cursor: &mut usize, depth: usize) -> Resul
                 }
                 break;
             }
-            if token.new_line || fixed_argument_count(&directive) == Some(directive.args.len()) {
+            if token.new_line {
+                let previous = directive.args.last().unwrap_or(&directive.name);
+                if depth != 0
+                    || !previous.text.ends_with(',')
+                    || directive.name.text.starts_with("tcp://")
+                    || directive.name.text.starts_with("tls://")
+                {
+                    break;
+                }
+            }
+            if fixed_argument_count(&directive) == Some(directive.args.len()) {
                 break;
             }
             directive.args.push(token.clone());

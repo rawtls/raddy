@@ -12,6 +12,20 @@ cargo build --locked --release
 ./target/release/raddy --config Raddyfile run
 ```
 
+### Multiple addresses in a site block (v0.5.1-rc.1)
+
+A trailing comma continues an HTTP(S) site address list on the next line. Comments and blank lines are allowed between addresses. Each address keeps its own port; the handlers and any `bind` apply to all of them.
+
+```caddyfile
+https://*.edge.example.com:9443,
+https://one.example.com,
+two.example.com {
+    respond "OK"
+}
+```
+
+If only `:9443` should bind to loopback, put it in a separate block. `tcp://` and `tls://` still take one address per block. On v0.5.0 keep the list on one line.
+
 ## Docker Compose (Linux host networking)
 
 Save `compose.yaml` next to your `Raddyfile`:
@@ -78,6 +92,8 @@ Validation compiles the HTTP handlers, checks their filesystem roots and validat
 Automatic certificate caches are isolated by ACME directory URL. Bundles from versions without that separation are not used automatically; the first start after upgrading can require fresh issuance. Raddy records pending DNS‑01 TXT cleanup in `data_dir` and retries it on start and during renewal when Cloudflare credentials are configured.
 
 ## Routing, TLS passthrough, and PROXY protocol
+
+**WebSocket close handling (v0.5.1-rc.1):** An upgraded connection has no idle timeout. Once Raddy reads EOF from either peer, the other direction has up to 10 seconds to finish before Raddy drops both sockets. This does not change TCP or TLS passthrough or the `stream_idle_timeout` setting.
 
 Use `reverse_proxy http://…` for HTTP/1.1 upstreams, including WebSocket upgrades. Use `reverse_proxy h2c://…` for an unencrypted HTTP/2 upstream, such as a gRPC service behind Raddy TLS termination. `handle` keeps the path; `handle_path` strips the matched prefix.
 

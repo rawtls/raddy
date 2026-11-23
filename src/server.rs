@@ -2292,7 +2292,7 @@ impl Server {
                 }
                 Err(error) if error.is::<UpstreamTimeout>() => return Err(error),
                 Err(error) => {
-                    last_error = Some(error);
+                    last_error = Some((upstream, error));
                     if retries == 0 {
                         break;
                     }
@@ -2302,7 +2302,10 @@ impl Server {
         }
         let mut response = match (response, last_error) {
             (Some(response), _) => response,
-            (_, Some(error)) => return Err(error),
+            (_, Some((upstream, error))) => {
+                let error = anyhow::Error::from_boxed(error);
+                return Err(format!("{}: {error:#}", upstream.authority).into());
+            }
             _ if websocket.is_some() && proxy.upstreams.iter().all(|upstream| upstream.h2c) => {
                 return Err("HTTP/1.1 WebSocket upgrade is not supported by h2c upstreams".into());
             }
@@ -2346,9 +2349,9 @@ impl Server {
                     _ = async {
                         match downstream.await {
                             Ok(downstream) => {
-                                if let Err(error) = tokio::io::copy_bidirectional(
-                                    &mut TokioIo::new(downstream),
-                                    &mut TokioIo::new(upstream),
+                                if let Err(error) = relay_websocket(
+                                    TokioIo::new(downstream),
+                                    TokioIo::new(upstream),
                                 )
                                 .await
                                 {
@@ -2609,6 +2612,30 @@ fn websocket_key(request: &Request<Option<Incoming>>) -> Option<&str> {
     let key = single_header(headers, SEC_WEBSOCKET_KEY)?;
     let mut nonce = [0; 18];
     (key.len() == 24 && STANDARD.decode_slice(key, &mut nonce).ok()? == 16).then_some(key)
+}
+
+async fn relay_websocket(
+    downstream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    upstream: impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+) -> std::io::Result<()> {
+    use tokio_util::io::InspectReader;
+
+    const HALF_CLOSE_GRACE: Duration = Duration::from_secs(10);
+    let eof = tokio::sync::Notify::new();
+    let on_read = |bytes: &[u8]| {
+        if bytes.is_empty() {
+            eof.notify_one();
+        }
+    };
+    let mut downstream = InspectReader::new(downstream, on_read);
+    let mut upstream = InspectReader::new(upstream, on_read);
+    let copy = tokio::io::copy_bidirectional(&mut downstream, &mut upstream);
+    tokio::pin!(copy);
+    tokio::select! {
+        result = &mut copy => result?,
+        _ = eof.notified() => timeout(HALF_CLOSE_GRACE, copy).await??,
+    };
+    Ok(())
 }
 
 fn websocket_accept(key: &str) -> String {

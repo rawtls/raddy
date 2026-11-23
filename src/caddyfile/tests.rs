@@ -144,6 +144,40 @@ fn parses_cloudflare_site_and_static_files() {
 }
 
 #[test]
+fn multiline_site_addresses_match_single_line() {
+    let single = "https://*.eu2.example.test:9443, https://one.example.test, two.example.test";
+    let multi = "https://*.eu2.example.test:9443, # first endpoint\r\n\r\n  # public sites\n  https://one.example.test,\n  two.example.test";
+    let config = |header| {
+        parse(&format!(
+            "{{ cloudflare {TOKEN} }}\n{header} {{ respond shared }}\nother.example.test {{ respond separate }}"
+        ))
+        .unwrap()
+    };
+    assert_eq!(
+        serde_json::to_value(config(multi)).unwrap(),
+        serde_json::to_value(config(single)).unwrap()
+    );
+    let err = parse("one.example.test,\n  tls://two.example.test:443 { respond no }")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("2:3:") && err.contains("unsupported site scheme"),
+        "{err}"
+    );
+}
+
+#[test]
+fn commas_inside_blocks_do_not_continue_directives() {
+    let config =
+        parse("http://one.test,\nhttp://two.test {\n respond /a hello,\n respond /b bye\n}")
+            .unwrap();
+    assert_eq!(config.sites.len(), 1);
+    assert_eq!(config.sites[0].hosts, ["one.test", "two.test"]);
+    assert_eq!(config.sites[0].responses[0].body, "hello,");
+    assert_eq!(config.sites[0].responses[1].body, "bye");
+}
+
+#[test]
 fn parses_http_reverse_proxy_and_port() {
     let config = parse(
         r#"

@@ -1,6 +1,6 @@
 [package]
 name = "raddy"
-version = "0.5.0"
+version = "0.5.1-rc.1"
 edition = "2024"
 description = "High-performance HTTPS reverse proxy with Cloudflare DNS-01"
 license = "Apache-2.0"
