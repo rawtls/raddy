@@ -110,9 +110,9 @@ tcp://:{relay} {{
                 process.wait(timeout=3)
         resources.callback(stop)
 
-        def wait(message):
+        def wait(message, occurrences=1):
             deadline = time.monotonic() + 5
-            while message not in re.sub(r"\x1b\[[0-9;]*m", "", (root / "raddy.log").read_text()):
+            while re.sub(r"\x1b\[[0-9;]*m", "", (root / "raddy.log").read_text()).count(message) < occurrences:
                 if process.poll() is not None or time.monotonic() > deadline:
                     raise AssertionError((message, (root / "raddy.log").read_text()))
                 time.sleep(0.03)
@@ -244,15 +244,8 @@ tcp://:{relay} {{
         rejected("127.0.0.2", v1)
         configure(32, "mixed", "from_trusted")
         process.send_signal(signal.SIGUSR1)
-        deadline = time.monotonic() + 5
-        while True:
-            try:
-                https(b"mixed")
-                break
-            except (AssertionError, ConnectionError):
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.03)
+        wait("configuration reloaded", occurrences=2)
+        https(b"mixed")
         assert identity("127.0.0.2") == b"direct"
         for preface in (v1, v2):
             assert identity("127.0.0.1", preface) == b"forwarded"
