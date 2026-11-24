@@ -97,11 +97,11 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--layer4", action="store_true")
     args = parser.parse_args()
+    with args.results.open() as source:
+        metadata = json.loads(next(source))
     cases = LAYER4_CASES if args.layer4 else HTTP_CASES
-    if not args.layer4:
-        with args.results.open() as source:
-            if json.loads(next(source)).get("mode") == "http-relay":
-                cases = HTTP_RELAY_CASES
+    if not args.layer4 and metadata.get("mode") == "http-relay":
+        cases = HTTP_RELAY_CASES
     results, servers = collect(args.results, cases)
     args.output.mkdir(parents=True, exist_ok=True)
     charts = [
@@ -110,6 +110,9 @@ def main():
     ]
     for name, metric, title, subtitle, value_label in charts:
         prefix = "layer4-" if args.layer4 else "http-relay-" if cases is HTTP_RELAY_CASES else ""
+        if cases is HTTP_RELAY_CASES:
+            version = metadata["raddy"].split()[-1]
+            subtitle = f"Raddy v{version} · {subtitle}"
         (args.output / f"{prefix}{name}").write_text(render(results, cases, servers, metric, title, subtitle, value_label))
 
 
