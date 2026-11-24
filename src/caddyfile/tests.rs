@@ -96,6 +96,32 @@ fn file_imports_resolve_relative_paths_and_ignore_hidden_glob_entries() {
     result.unwrap();
 }
 
+#[test]
+fn proxy_accept_modes_validate_and_round_trip() {
+    let parse_rules = |rules: &str| {
+        parse(&format!(
+            "{{\n{rules}\n}}\ntls://a.test:443 {{ proxy localhost:3000 }}"
+        ))
+    };
+    for mode in ["", "from_trusted "] {
+        let rule = format!("proxy_protocol_accept 443 {mode}");
+        let config = parse_rules(&format!("{rule}192.0.2.1\n{rule}2001:db8::/64")).unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        let config: crate::config::Config = serde_json::from_str(&json).unwrap();
+        let policies = config.proxy_protocol_networks().unwrap();
+        assert_eq!(policies[&443].direct_tls, !mode.is_empty());
+        assert_eq!(policies[&443].networks.len(), 2);
+    }
+    for rules in [
+        "proxy_protocol_accept 443 from_trusted",
+        "proxy_protocol_accept 443 from_trusted 0.0.0.0/0",
+        "proxy_protocol_accept 443 192.0.2.1\nproxy_protocol_accept 443 from_trusted 192.0.2.2",
+    ] {
+        assert!(parse_rules(rules).is_err());
+    }
+    assert!(parse("{ proxy_protocol_accept 9000 from_trusted 127.0.0.1 }\ntcp://:9000 { proxy localhost:3000 }").is_err());
+}
+
 const TOKEN: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN";
 
 #[test]

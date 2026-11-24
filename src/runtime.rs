@@ -94,9 +94,11 @@ impl TlsEndpoint {
         mut socket: TcpStream,
         peer: SocketAddr,
         connections: Connections,
+        allow_tcp_fallback: bool,
     ) -> Result<()> {
+        let tcp = self.tcp.as_deref().filter(|_| allow_tcp_fallback);
         if self.passthrough.is_none()
-            && self.tcp.is_none()
+            && tcp.is_none()
             && let Some(https) = &self.https
         {
             let mut connections = connections;
@@ -141,13 +143,11 @@ impl TlsEndpoint {
         {
             Ok(Ok(Inspection::Closed)) => return Ok(()),
             Ok(Ok(Inspection::Tcp)) => {
-                return self
-                    .tcp_fallback(socket, &prefix, connections.addresses)
-                    .await;
+                return Self::tcp_fallback(tcp, socket, &prefix, connections.addresses).await;
             }
             Ok(Ok(Inspection::Tls(sni))) => sni,
             Err(_) if !started_tls => {
-                return self.tcp_fallback(socket, &[], connections.addresses).await;
+                return Self::tcp_fallback(tcp, socket, &[], connections.addresses).await;
             }
             Err(error) => return Err(error).context("timed out reading TLS ClientHello"),
             Ok(Err(error)) => return Err(error),
@@ -187,20 +187,17 @@ impl TlsEndpoint {
                     .relay(socket, route, &prefix, name, connections.addresses)
                     .await
             }
-            _ => {
-                self.tcp_fallback(socket, &prefix, connections.addresses)
-                    .await
-            }
+            _ => Self::tcp_fallback(tcp, socket, &prefix, connections.addresses).await,
         }
     }
 
     async fn tcp_fallback(
-        &self,
+        tcp: Option<&StreamProxy>,
         socket: TcpStream,
         prefix: &[u8],
         addresses: Option<Addresses>,
     ) -> Result<()> {
-        if let Some(proxy) = &self.tcp
+        if let Some(proxy) = tcp
             && let Some(route) = proxy.route(None)
         {
             proxy.relay(socket, route, prefix, None, addresses).await?;
@@ -212,7 +209,7 @@ impl TlsEndpoint {
 #[derive(Clone)]
 struct ListenerEndpoint {
     handler: Endpoint,
-    trusted: Option<Arc<[ipnet::IpNet]>>,
+    trusted: Option<Arc<crate::config::ProxyTrust>>,
     max_connections: usize,
 }
 
@@ -276,10 +273,10 @@ impl Runtime {
             new_listeners.push((address, sockets));
         }
         let mut endpoints = HashMap::new();
-        let trusted: HashMap<_, Arc<[ipnet::IpNet]>> = config
+        let trusted: HashMap<_, _> = config
             .proxy_protocol_networks()?
             .into_iter()
-            .map(|(port, sources)| (port, sources.into()))
+            .map(|(port, policy)| (port, Arc::new(policy)))
             .collect();
         let mut stream_ports: HashMap<SocketAddr, TlsEndpoint> = HashMap::new();
         for stream in &config.streams {
@@ -498,33 +495,39 @@ async fn serve(
             destination,
         });
     }
-    if let Some(trusted) = &endpoint.trusted {
-        if !trusted
+    let mut allow_tcp_fallback = true;
+    if let Some(policy) = &endpoint.trusted {
+        let source = peer.ip().to_canonical();
+        if policy
+            .networks
             .iter()
-            .any(|network| network.contains(&peer.ip().to_canonical()))
+            .any(|network| network.contains(&source))
         {
+            match timeout(
+                proxy_protocol::HEADER_TIMEOUT,
+                proxy_protocol::read(&mut socket),
+            )
+            .await
+            {
+                Ok(Ok(Some(addresses))) => {
+                    peer = addresses.source;
+                    connections.addresses = Some(addresses);
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => {
+                    tracing::debug!(%peer, %error, "invalid PROXY protocol header");
+                    return;
+                }
+                Err(_) => {
+                    tracing::debug!(%peer, "PROXY protocol header timed out");
+                    return;
+                }
+            }
+        } else if policy.direct_tls {
+            allow_tcp_fallback = false;
+        } else {
             tracing::debug!(%peer, "untrusted peer on PROXY protocol listener");
             return;
-        }
-        match timeout(
-            proxy_protocol::HEADER_TIMEOUT,
-            proxy_protocol::read(&mut socket),
-        )
-        .await
-        {
-            Ok(Ok(Some(addresses))) => {
-                peer = addresses.source;
-                connections.addresses = Some(addresses);
-            }
-            Ok(Ok(None)) => {}
-            Ok(Err(error)) => {
-                tracing::debug!(%peer, %error, "invalid PROXY protocol header");
-                return;
-            }
-            Err(_) => {
-                tracing::debug!(%peer, "PROXY protocol header timed out");
-                return;
-            }
         }
     }
     match endpoint.handler {
@@ -533,7 +536,10 @@ async fn serve(
             server.serve_socket(socket, peer, None, connections).await;
         }
         Endpoint::Tls(endpoint) => {
-            if let Err(error) = endpoint.serve(socket, peer, connections).await {
+            if let Err(error) = endpoint
+                .serve(socket, peer, connections, allow_tcp_fallback)
+                .await
+            {
                 tracing::debug!(%peer, %error, "TLS listener connection closed");
             }
         }

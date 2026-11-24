@@ -153,6 +153,9 @@ impl Builder {
                         "proxy_protocol_accept expects a listener port and trusted IP addresses or CIDRs",
                     ));
                 };
+                use crate::config::ProxyAccept;
+                let mixed = sources.first() == Some(&"from_trusted");
+                let sources = &sources[usize::from(mixed)..];
                 if sources.is_empty() {
                     return Err(at(
                         &directive.name,
@@ -160,11 +163,30 @@ impl Builder {
                     ));
                 }
                 let port = parse_port(port, &directive.args[0])?;
-                self.config
+                let policy = self
+                    .config
                     .proxy_protocol_accept
                     .entry(port)
-                    .or_default()
-                    .extend(sources.iter().map(|source| (*source).to_owned()));
+                    .or_insert_with(|| {
+                        if mixed {
+                            ProxyAccept::FromTrusted {
+                                from_trusted: Vec::new(),
+                            }
+                        } else {
+                            ProxyAccept::Required(Vec::new())
+                        }
+                    });
+                let networks = match policy {
+                    ProxyAccept::Required(networks) if !mixed => networks,
+                    ProxyAccept::FromTrusted { from_trusted } if mixed => from_trusted,
+                    _ => {
+                        return Err(at(
+                            &directive.name,
+                            "conflicting PROXY protocol modes on one port",
+                        ));
+                    }
+                };
+                networks.extend(sources.iter().map(|source| (*source).to_owned()));
             }
             "max_connections" => {
                 no_children(directive)?;

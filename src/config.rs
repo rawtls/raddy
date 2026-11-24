@@ -44,7 +44,19 @@ pub struct Config {
     #[serde(default)]
     pub streams: Vec<StreamConfig>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub proxy_protocol_accept: BTreeMap<u16, Vec<String>>,
+    pub proxy_protocol_accept: BTreeMap<u16, ProxyAccept>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum ProxyAccept {
+    Required(Vec<String>),
+    FromTrusted { from_trusted: Vec<String> },
+}
+
+pub(crate) struct ProxyTrust {
+    pub networks: Vec<ipnet::IpNet>,
+    pub direct_tls: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -517,10 +529,18 @@ impl Config {
         Ok(())
     }
 
-    pub(crate) fn proxy_protocol_networks(&self) -> Result<BTreeMap<u16, Vec<ipnet::IpNet>>> {
+    pub(crate) fn proxy_protocol_networks(&self) -> Result<BTreeMap<u16, ProxyTrust>> {
         self.proxy_protocol_accept
             .iter()
-            .map(|(&port, sources)| {
+            .map(|(&port, policy)| {
+                let (sources, direct_tls) = match policy {
+                    ProxyAccept::Required(sources) => (sources, false),
+                    ProxyAccept::FromTrusted { from_trusted } => (from_trusted, true),
+                };
+                if direct_tls && !self.sites.iter().any(|site| site.tls && site.listen.unwrap_or(self.https_addr).port() == port)
+                    && !self.streams.iter().any(|stream| stream.listen.port() == port && stream.mode == StreamMode::TlsPassthrough) {
+                    bail!("proxy_protocol_accept from_trusted requires an HTTPS or TLS passthrough listener on port {port}");
+                }
                 if port == 0 || sources.is_empty() {
                     bail!(
                         "proxy_protocol_accept requires a fixed port and trusted source addresses"
@@ -552,7 +572,7 @@ impl Config {
                         Ok(network)
                     })
                     .collect::<Result<_>>()?;
-                Ok((port, networks))
+                Ok((port, ProxyTrust { networks, direct_tls }))
             })
             .collect()
     }

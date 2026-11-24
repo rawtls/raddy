@@ -58,13 +58,21 @@ def main(binary):
         http, shared, relay = (allocate() for _ in range(3))
         upstream = backend.getsockname()[1]
 
-        def configure(limit, body):
+        def configure(limit, body, mode=""):
             config.write_text(f'''{{
     default_bind 127.0.0.1
     http_port {http}
     https_port {shared}
     max_connections {limit}
-    proxy_protocol_accept {shared} 127.0.0.1/32
+    proxy_protocol_accept {shared} {mode} 127.0.0.1/32
+}}
+https://identity.example.test {{
+    tls {cert} {key}
+    @forwarded expression `{{client_ip}} == "198.51.100.9"`
+    @direct expression `{{client_ip}} == "127.0.0.2"`
+    handle @forwarded {{ respond forwarded }}
+    handle @direct {{ respond direct }}
+    handle {{ respond unknown }}
 }}
 https://*.example.test {{
     tls {cert} {key}
@@ -213,8 +221,53 @@ tcp://:{relay} {{
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(0.02)
+        def identity(source, preface=b""):
+            with socket.create_connection(("127.0.0.1", shared), 3, (source, 0)) as conn:
+                if preface:
+                    conn.sendall(preface)
+                with tls.wrap_socket(conn, server_hostname="identity.example.test") as client:
+                    client.sendall(b"GET / HTTP/1.1\r\nHost: identity.example.test\r\nX-Forwarded-For: 198.51.100.9\r\nConnection: close\r\n\r\n")
+                    with HTTPResponse(client) as response:
+                        response.begin()
+                        assert response.status == 200
+                        return response.read()
+
+        def rejected(source, preface=b""):
+            try:
+                identity(source, preface)
+            except (ssl.SSLError, ConnectionError):
+                return
+            raise AssertionError("unexpectedly accepted " + source)
+
+        v1 = b"PROXY TCP4 198.51.100.9 203.0.113.6 5678 443\r\n"
+        v2 = SIGNATURE + b"\x21\x11\x00\x0c" + expected
+        rejected("127.0.0.2", v1)
+        configure(32, "mixed", "from_trusted")
+        process.send_signal(signal.SIGUSR1)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                https(b"mixed")
+                break
+            except (AssertionError, ConnectionError):
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.03)
+        assert identity("127.0.0.2") == b"direct"
+        for preface in (v1, v2):
+            assert identity("127.0.0.1", preface) == b"forwarded"
+            rejected("127.0.0.2", preface)
+        rejected("127.0.0.1")
+        rejected("127.0.0.1", b"PROXY broken\r\n")
+        with socket.create_connection(("127.0.0.1", shared), 3, ("127.0.0.2", 0)) as conn:
+            conn.sendall(hello)
+            with backend.accept()[0] as upstream_conn:
+                upstream_conn.settimeout(3)
+                assert exact(upstream_conn, 16) == SIGNATURE + b"\x21\x11\x00\x0c"
+                assert exact(upstream_conn, 12) == socket.inet_aton("127.0.0.2") + socket.inet_aton("127.0.0.1") + struct.pack("!HH", conn.getsockname()[1], shared)
+                assert exact(upstream_conn, len(hello)) == hello
         assert process.poll() is None
-        print("Shared port, PROXY v1/v2, TLS static files, connection admission and reload passed")
+        print("Shared port, strict/mixed PROXY v1/v2, TLS static files, connection admission and reload passed")
 
 
 if __name__ == "__main__":
